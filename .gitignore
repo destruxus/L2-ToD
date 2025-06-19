@@ -71,6 +71,7 @@ dmypy.json
 *.db-journal
 *.db-shm
 *.db-wal
+*.db-*
 
 # You can also be specific with your database name as a fallback
 bot_database.db

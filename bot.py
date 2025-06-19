@@ -399,4 +399,10 @@ async def on_ready():
 
 @check_all_boss_windows.before_loop
 async def before_check():
-    await
+    await bot.wait_until_ready()
+
+if __name__ == "__main__":
+    if not DISCORD_BOT_TOKEN:
+        print("FATAL ERROR: DISCORD_BOT_TOKEN is missing from environment variables.")
+    else:
+        bot.run(DISCORD_BOT_TOKEN)

@@ -3,7 +3,7 @@ This is a hobby project to create a discord bot for Clan use in the Lineage 2 ga
 
 A sophisticated, multi-server Discord bot for tracking Lineage 2 boss respawn timers with precision and automation. Built with Python and discord.py, this bot integrates with Raid-Helper and uses a secure, database-driven backend to provide a robust and scalable timing solution for any number of guilds.
 
-##Key Features
+## Key Features
 Multi-Boss & Multi-Server: Track any number of custom-configured bosses simultaneously, with all data securely isolated per Discord server.
 Slash Command Interface: All commands are modern, intuitive slash commands (e.g., /tod aq).
 Configuration-Driven: Easily add, edit, or remove boss timers by modifying a central configuration dictionary in the code.
@@ -13,7 +13,7 @@ Database Backend: Uses a persistent SQLite database to remember all timer and co
 Secure & Private: All sensitive data (like Raid-Helper API keys) is encrypted at rest in the database. The bot includes clear privacy policies and data-wiping commands for user control.
 Admin-Friendly: A simple, DM-based configuration wizard (/tod configure) allows server owners to set up the bot without needing to touch any code.
 
-##User Commands
+## User Commands
 ###General Commands
 /tod <boss>
 Sets the Time of Death (TOD) for the specified boss to the current time. This is the primary command for resetting a timer.
@@ -32,7 +32,7 @@ Sends a private message (visible only to you) detailing all bot features and com
 /tod privacy
 Displays the bot's privacy policy, explaining what data is stored and why.
 
-###Admin-Only Commands
+### Admin-Only Commands
 (Requires "Administrator" permission on the server)
 
 /tod configure
@@ -41,10 +41,10 @@ Initiates a private DM conversation to guide you through setting up or updating 
 /tod wipe_my_data
 IRREVERSIBLE. Permanently deletes all data associated with your server from the bot's database. A confirmation prompt is required.
 
-##Self-Hosting & Installation Guide
+## Self-Hosting & Installation Guide
 Follow these steps to host your own instance of the bot.
 
-###1. Prerequisites
+### 1. Prerequisites
 Python 3.8+
 A Git client
 A Discord Bot application with a Token.
@@ -71,19 +71,18 @@ key = Fernet.generate_key()
 print("Copy this key to your .env file:")
 print(key.decode())
 
-###Configure Environment Variables:
+### Configure Environment Variables:
 Create a file named .env in the root directory and fill it out. Do not share this file.
-
 Code snippet
-
+```
 # Your Discord Bot's Token
 DISCORD_BOT_TOKEN="PASTE_YOUR_DISCORD_BOT_TOKEN_HERE"
-
-# The master key you generated in the previous step
-DATABASE_ENCRYPTION_KEY="PASTE_YOUR_GENERATED_ENCRYPTION_KEY_HERE"
+ The master key you generated in the previous step
+# DATABASE_ENCRYPTION_KEY="PASTE_YOUR_GENERATED_ENCRYPTION_KEY_HERE"
+```
 Note: Server-specific settings like channel IDs are now configured via the /tod configure command after the bot is running.
 
-###Run the Bot:
+### Run the Bot:
 
 Bash
 

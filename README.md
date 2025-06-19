@@ -4,14 +4,14 @@ This is a hobby project to create a discord bot for Clan use in the Lineage 2 ga
 A sophisticated, multi-server Discord bot for tracking Lineage 2 boss respawn timers with precision and automation. Built with Python and discord.py, this bot integrates with Raid-Helper and uses a secure, database-driven backend to provide a robust and scalable timing solution for any number of guilds.
 
 ## Key Features
-Multi-Boss & Multi-Server: Track any number of custom-configured bosses simultaneously, with all data securely isolated per Discord server.
-Slash Command Interface: All commands are modern, intuitive slash commands (e.g., /tod aq).
-Configuration-Driven: Easily add, edit, or remove boss timers by modifying a central configuration dictionary in the code.
-Automated "Lost Window" Calculation: If a timer expires, the bot automatically calculates and posts a "lost" window with an extended duration, providing a worst-case scenario.
-Smart Automation Pause: To prevent infinite extensions, the automation for any boss is automatically paused if its timer window grows beyond 16 hours, requiring manual intervention.
-Database Backend: Uses a persistent SQLite database to remember all timer and configuration states, even after a restart.
-Secure & Private: All sensitive data (like Raid-Helper API keys) is encrypted at rest in the database. The bot includes clear privacy policies and data-wiping commands for user control.
-Admin-Friendly: A simple, DM-based configuration wizard (/tod configure) allows server owners to set up the bot without needing to touch any code.
+Multi-Boss & Multi-Server: Track any number of custom-configured bosses simultaneously, with all data securely isolated per Discord server. \
+Slash Command Interface: All commands are modern, intuitive slash commands (e.g., /tod aq). \
+Configuration-Driven: Easily add, edit, or remove boss timers by modifying a central configuration dictionary in the code. \
+Automated "Lost Window" Calculation: If a timer expires, the bot automatically calculates and posts a "lost" window with an extended duration, providing a worst-case scenario. \
+Smart Automation Pause: To prevent infinite extensions, the automation for any boss is automatically paused if its timer window grows beyond 16 hours, requiring manual intervention. \
+Database Backend: Uses a persistent SQLite database to remember all timer and configuration states, even after a restart. \
+Secure & Private: All sensitive data (like Raid-Helper API keys) is encrypted at rest in the database. The bot includes clear privacy policies and data-wiping commands for user control. \
+Admin-Friendly: A simple, DM-based configuration wizard (/tod configure) allows server owners to set up the bot without needing to touch any code. \
 
 ## User Commands
 ### General Commands

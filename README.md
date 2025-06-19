@@ -14,7 +14,7 @@ Secure & Private: All sensitive data (like Raid-Helper API keys) is encrypted at
 Admin-Friendly: A simple, DM-based configuration wizard (/tod configure) allows server owners to set up the bot without needing to touch any code.
 
 ## User Commands
-###General Commands
+### General Commands
 /tod <boss>
 Sets the Time of Death (TOD) for the specified boss to the current time. This is the primary command for resetting a timer.
 
@@ -89,7 +89,7 @@ Bash
 python bot.py
 The first time the bot runs, it will create a bot_database.db file. The slash commands may take up to an hour to sync with Discord globally for the first time.
 
-##3. Hosting
+## 3. Hosting
 For 24/7 operation, you must host the bot on a server.
 
 Recommended: A service like Render on their free tier. You must use their Persistent Disks feature to store the bot_database.db file, preventing data loss on restarts.
@@ -106,7 +106,7 @@ Save the file and restart the bot for changes to take effect. The /tod subcomman
 First-Time Setup on a New Server
 When the bot joins a new server, an administrator must run /tod configure. This will trigger a private DM conversation to securely provide the server's unique settings, which are then saved to the bot's database.
 
-##License
+## License
 This project is licensed under the GNU Affero General Public License v3.0. A copy of the license is included in the LICENSE file in this repository. In short, any modifications to this software that are run on a network must also have their source code made available to users under the same license.
 
 Copyright (C) 2025 Destruxus

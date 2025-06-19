@@ -80,6 +80,7 @@ BOSS_CONFIG = {
 
 # --- Discord Bot Setup ---
 intents = discord.Intents.default()
+intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # --- Confirmation View for Dangerous Actions ---

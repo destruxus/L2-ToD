@@ -125,7 +125,7 @@ class TodCommandGroup(app_commands.Group):
 
     async def _process_tod(self, interaction: discord.Interaction, boss_key: str, timestamp: str = None):
         if not await self._is_configured(interaction): return
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=False) # Defer publicly so we can send a public success message
 
         config = BOSS_CONFIG[boss_key.upper()]
         conn = db_connect()
@@ -155,8 +155,16 @@ class TodCommandGroup(app_commands.Group):
         existing_event_id = (cursor.execute("SELECT event_id FROM timer_states WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, boss_key.upper())).fetchone() or [None])[0]
         
         h = {"Authorization": f"Bearer {rh_api_key}", "Content-Type": "application/json"}
-        url = f"https://raid-helper.dev/api/v2/events/{existing_event_id}" if existing_event_id else f"https://raid-helper.dev/api/v2/servers/{interaction.guild_id}/events"
-        response = requests.put(url, json=payload, headers=h) if existing_event_id else requests.post(url, json=payload, headers=h)
+        
+        # --- CRITICAL FIX: Use the correct URL for creating vs. updating ---
+        if existing_event_id:
+            # This is an UPDATE, use the event-specific URL
+            url = f"https://raid-helper.dev/api/v2/events/{existing_event_id}"
+            response = requests.put(url, json=payload, headers=h)
+        else:
+            # This is a CREATE, use the new channel-specific URL
+            url = f"https://raid-helper.dev/api/v2/servers/{interaction.guild_id}/channels/{events_channel_id}/event"
+            response = requests.post(url, json=payload, headers=h)
 
         if response.status_code in [200, 201]:
             rh_response = response.json()
@@ -165,9 +173,9 @@ class TodCommandGroup(app_commands.Group):
                 ON CONFLICT(server_id, boss_key) DO UPDATE SET event_id=excluded.event_id, start_time=excluded.start_time, end_time=excluded.end_time, duration_hours=excluded.duration_hours, status=excluded.status;
             """, (interaction.guild_id, boss_key.upper(), rh_response['id'], event_start_time.isoformat(), event_end_time.isoformat(), duration, "active"))
             conn.commit()
-            await interaction.followup.send(f"✅ Timer for **{config['name']}** set! Next window opens <t:{int(event_start_time.timestamp())}:R>.", ephemeral=False)
+            await interaction.followup.send(f"✅ Timer for **{config['name']}** set! Next window opens <t:{int(event_start_time.timestamp())}:R>.")
         else:
-            await interaction.followup.send(f"❌ Raid-Helper API Error: `{response.status_code}` - {response.text}. Check API key and channel permissions.", ephemeral=True)
+            await interaction.followup.send(f"❌ Raid-Helper API Error: `{response.status_code}`\n```html\n{response.text[:1500]}\n```\nCheck API key and channel permissions.", ephemeral=True)
         conn.close()
 
     @app_commands.command(name="aq", description="Set the Time of Death for Ant Queen.")
@@ -292,7 +300,7 @@ class TodCommandGroup(app_commands.Group):
 @tasks.loop(minutes=1)
 async def check_all_boss_windows():
     conn = db_connect()
-    conn.row_factory = sqlite3.Row # Allows accessing columns by name
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     active_timers = cursor.execute("SELECT * FROM timer_states WHERE status = 'active'").fetchall()
     
@@ -302,7 +310,12 @@ async def check_all_boss_windows():
             server_config = cursor.execute("SELECT * FROM servers WHERE server_id = ?", (timer['server_id'],)).fetchone()
             if not server_config: continue
 
-            rh_api_key = fernet.decrypt(server_config['raid_helper_api_key']).decode()
+            try:
+                rh_api_key = fernet.decrypt(server_config['raid_helper_api_key']).decode()
+            except Exception:
+                print(f"BACKGROUND TASK: Could not decrypt key for server {timer['server_id']}. Skipping.")
+                continue
+
             config = BOSS_CONFIG[timer['boss_key']]
             new_duration = timer['duration_hours'] + 4
 
@@ -316,6 +329,7 @@ async def check_all_boss_windows():
                 start_time = datetime.fromisoformat(timer['start_time'])
                 new_start_time = start_time + timedelta(hours=config['lost_respawn_shift_hours'])
                 new_end_time = new_start_time + timedelta(hours=new_duration)
+                
                 payload = { "name": f"{config['emoji']} {config['name']} Window (LOST - {new_duration}h)", "leader": "BOT", "start": new_start_time.isoformat(), "end": new_end_time.isoformat(), "description": "Previous window missed. Calculating max respawn.", "channel": str(server_config['events_channel_id']), "settings": {"color": "#800000"} }
                 
                 h = {"Authorization": f"Bearer {rh_api_key}", "Content-Type": "application/json"}
@@ -333,6 +347,19 @@ async def on_ready():
     print(f'Logged in as {bot.user.name} ({bot.user.id})')
     if not fernet: print("\nWARNING: DATABASE_ENCRYPTION_KEY not set. Bot will run but configuration commands will fail.\n")
     setup_database()
+
+    # --- Diagnostic log at startup ---
+    print("--- Verifying stored server configurations ---")
+    conn = db_connect()
+    servers = conn.cursor().execute("SELECT server_id, events_channel_id, alerts_channel_id FROM servers").fetchall()
+    if not servers:
+        print("No servers are configured in the database yet.")
+    else:
+        for server in servers:
+            print(f"  > Found Server ID: {server[0]}, Events Channel: {server[1]}, Alerts Channel: {server[2]}")
+    print("------------------------------------------")
+    conn.close()
+    
     bot.tree.add_command(TodCommandGroup(name="tod", description="L2 Boss Timer Commands"))
     await bot.tree.sync()
     print("Slash commands synced.")

@@ -1,4 +1,4 @@
-# L2 Time-of-Death Bot
+# L2 Multi-Boss Timer Bot
 # A Discord bot for tracking Lineage 2 boss respawn timers.
 # Copyright (C) 2025  Destruxus
 #
@@ -19,6 +19,7 @@ import os
 import sqlite3
 import re
 import asyncio
+import requests
 from datetime import datetime, timedelta, timezone
 
 import discord
@@ -80,10 +81,10 @@ BOSS_CONFIG = {
 
 # --- Discord Bot Setup ---
 intents = discord.Intents.default()
-intents.message_content = True
+intents.message_content = True  # Required for reading DM replies in configure command
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# --- Confirmation View for Dangerous Actions ---
+# --- UI Views ---
 class ConfirmationView(ui.View):
     def __init__(self, author: discord.User):
         super().__init__(timeout=60)
@@ -91,13 +92,16 @@ class ConfirmationView(ui.View):
         self.author = author
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author.id
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message("This confirmation is not for you.", ephemeral=True)
+            return False
+        return True
 
-    @ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    @ui.button(label="Confirm Deletion", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: ui.Button):
         self.value = True
         self.stop()
-        await interaction.response.edit_message(content="Confirmed. Deleting data...", view=None)
+        await interaction.response.edit_message(content="Confirmed. Deleting all data for this server...", view=None)
 
     @ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: ui.Button):
@@ -116,9 +120,12 @@ class TodCommandGroup(app_commands.Group):
             await interaction.response.send_message("This server has not been configured. An administrator must run `/tod configure` first.", ephemeral=True)
         return is_conf is not None
 
+    async def _find_channel_by_name(self, guild: discord.Guild, name: str) -> discord.TextChannel | None:
+        return discord.utils.get(guild.text_channels, name=name)
+
     async def _process_tod(self, interaction: discord.Interaction, boss_key: str, timestamp: str = None):
         if not await self._is_configured(interaction): return
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
 
         config = BOSS_CONFIG[boss_key.upper()]
         conn = db_connect()
@@ -158,9 +165,9 @@ class TodCommandGroup(app_commands.Group):
                 ON CONFLICT(server_id, boss_key) DO UPDATE SET event_id=excluded.event_id, start_time=excluded.start_time, end_time=excluded.end_time, duration_hours=excluded.duration_hours, status=excluded.status;
             """, (interaction.guild_id, boss_key.upper(), rh_response['id'], event_start_time.isoformat(), event_end_time.isoformat(), duration, "active"))
             conn.commit()
-            await interaction.followup.send(f"✅ Timer for **{config['name']}** set! Next window opens <t:{int(event_start_time.timestamp())}:R>.")
+            await interaction.followup.send(f"✅ Timer for **{config['name']}** set! Next window opens <t:{int(event_start_time.timestamp())}:R>.", ephemeral=False)
         else:
-            await interaction.followup.send(f"❌ Raid-Helper API Error: `{response.status_code}`. Check API key and channel permissions.", ephemeral=True)
+            await interaction.followup.send(f"❌ Raid-Helper API Error: `{response.status_code}` - {response.text}. Check API key and channel permissions.", ephemeral=True)
         conn.close()
 
     @app_commands.command(name="aq", description="Set the Time of Death for Ant Queen.")
@@ -179,6 +186,7 @@ class TodCommandGroup(app_commands.Group):
         conn.close()
         
         embed = discord.Embed(title="Boss Timer Overview", color=discord.Color.dark_gold(), timestamp=datetime.now(timezone.utc))
+        embed.set_footer(text=f"Server: {interaction.guild.name}")
         if not timers:
             embed.description = "No timers have been set for this server yet. Use `/tod <boss>` to start one."
         
@@ -207,99 +215,115 @@ class TodCommandGroup(app_commands.Group):
         cmd_list = "".join([f"**`/tod {k.lower()}`**\n› Respawn: **{v['respawn_hours']}h**, Duration: **{v['duration_hours']}h**.\n\n" for k, v in BOSS_CONFIG.items()])
         cmd_list += "**`/tod <boss> timestamp:<timestamp>`**\n› Sets the TOD to a specific time.\n\n**`/tod overview`**\n› Shows the status of all boss timers."
         embed.add_field(name="📊 General Commands", value=cmd_list, inline=False)
-        embed.add_field(name="⚙️ Automated Features", value="**1. Lost Window:** If a timer expires, a 'lost' window is calculated automatically.\n**2. Safety Pause:** Automation pauses if a window's duration exceeds 16 hours.", inline=False)
+        embed.add_field(name="⚙️ Automated Features", value="**1. Lost Window:** If a timer expires, a 'lost' window is calculated automatically.\n**2. Safety Pause:** Automation pauses if a window's duration would exceed 16 hours.", inline=False)
         embed.add_field(name="👑 Admin Commands", value="**`/tod configure`**\n› Setup the bot for this server.\n**`/tod wipe_my_data`**\n› Deletes all data for this server.\n**`/tod privacy`**\n› Shows the privacy policy.", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="privacy", description="Displays the bot's privacy policy.")
     async def privacy(self, interaction: discord.Interaction):
-        embed = discord.Embed(title="Privacy Policy", color=discord.Color.light_grey())
-        embed.description = ("This bot is designed with privacy as a core principle.\n\n"
-                             "**What Data is Stored?**\n- Your Discord Server ID & configured Channel IDs.\n- The Raid-Helper API key you provide, which is **always encrypted**.\n- The current state of your boss timers.\n\n"
-                             "**Data Access & Deletion**\nYour server's data is never shared. You can permanently delete all data for your server at any time by running `/tod wipe_my_data`.")
+        embed = discord.Embed(title="Privacy Policy", color=discord.Color.light_grey(), description="This bot is designed with privacy and data isolation as core principles.")
+        embed.add_field(name="What Data is Stored?", value="- Your Discord Server ID & configured Channel IDs.\n- The Raid-Helper API key you provide, which is **always encrypted**.\n- The current state of your configured boss timers.", inline=False)
+        embed.add_field(name="Data Access & Deletion", value="Your server's data is never shared. You can permanently delete all data for your server at any time by running `/tod wipe_my_data`.", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="configure", description="Admin Only: Configure the bot for this server.")
     @app_commands.checks.has_permissions(administrator=True)
     async def configure(self, interaction: discord.Interaction):
         if not fernet:
-            await interaction.response.send_message("❌ **Configuration Error:** The bot operator has not set a `DATABASE_ENCRYPTION_KEY`. This command is disabled.", ephemeral=True)
-            return
+            return await interaction.response.send_message("❌ **Configuration Error:** The bot operator has not set a `DATABASE_ENCRYPTION_KEY`. This command is disabled.", ephemeral=True)
         
         await interaction.response.send_message("I've sent you a DM to start the configuration.", ephemeral=True)
-        dm_channel = await interaction.user.create_dm()
-        
-        questions = { "events_channel_id": "What is the **Channel ID** for Raid-Helper events?", "alerts_channel_id": "What is the **Channel ID** for bot alerts?", "raid_helper_api_key": "What is your **Raid-Helper API Key**?" }
+        try:
+            dm_channel = await interaction.user.create_dm()
+        except discord.Forbidden:
+            return await interaction.followup.send("I couldn't send you a DM. Please check your server privacy settings.", ephemeral=True)
+
+        questions = { "events_channel_id": "What is the exact **name** of the channel for Raid-Helper events?", "alerts_channel_id": "What is the exact **name** of the channel for bot alerts?", "raid_helper_api_key": "Finally, what is your **Raid-Helper API Key**?" }
         answers = {}
 
+        await dm_channel.send(f"👋 Let's configure the bot for **{interaction.guild.name}**. You can type `cancel` at any time to stop.")
         for key, question in questions.items():
             try:
                 await dm_channel.send(question)
                 def check(m): return m.author == interaction.user and m.channel == dm_channel
                 msg = await bot.wait_for('message', timeout=300.0, check=check)
-                answers[key] = msg.content
-                await dm_channel.send(f"✅ Set **{key}** to `{'******' if 'key' in key else msg.content}`")
-            except asyncio.TimeoutError: return await dm_channel.send("Configuration timed out.")
+                reply_content = msg.content.strip()
 
+                if reply_content.lower() == 'cancel': return await dm_channel.send("Configuration cancelled.")
+                
+                if "channel" in key:
+                    target_channel = await self._find_channel_by_name(interaction.guild, reply_content)
+                    if not target_channel: return await dm_channel.send(f"❌ I could not find a channel named `#{reply_content}`. Configuration cancelled.")
+                    answers[key] = target_channel.id
+                    await dm_channel.send(f"✅ Found it! I will use `#{target_channel.name}`.")
+                else:
+                    answers[key] = reply_content
+                    await dm_channel.send(f"✅ API Key has been recorded.")
+            except asyncio.TimeoutError: return await dm_channel.send("Configuration timed out.")
+        
         try:
             encrypted_key = fernet.encrypt(answers['raid_helper_api_key'].encode())
             conn = db_connect()
             cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO servers (server_id, events_channel_id, alerts_channel_id, raid_helper_api_key) VALUES (?, ?, ?, ?)
-                ON CONFLICT(server_id) DO UPDATE SET events_channel_id=excluded.events_channel_id, alerts_channel_id=excluded.alerts_channel_id, raid_helper_api_key=excluded.raid_helper_api_key;
-            """, (interaction.guild_id, int(answers['events_channel_id']), int(answers['alerts_channel_id']), encrypted_key))
+            cursor.execute("""INSERT INTO servers (server_id, events_channel_id, alerts_channel_id, raid_helper_api_key) VALUES (?, ?, ?, ?)
+                              ON CONFLICT(server_id) DO UPDATE SET events_channel_id=excluded.events_channel_id, alerts_channel_id=excluded.alerts_channel_id, raid_helper_api_key=excluded.raid_helper_api_key;
+                           """, (interaction.guild_id, answers['events_channel_id'], answers['alerts_channel_id'], encrypted_key))
             conn.commit()
             conn.close()
             await dm_channel.send("✅ **Configuration saved securely!**")
-        except Exception as e: await dm_channel.send(f"❌ **Error saving configuration!** Check that your channel IDs are correct.\n`{e}`")
+        except Exception as e: await dm_channel.send(f"❌ **Error saving configuration!** Check that your inputs are correct.\n`{e}`")
 
     @app_commands.command(name="wipe_my_data", description="Admin Only: Deletes all data for this server.")
     @app_commands.checks.has_permissions(administrator=True)
     async def wipe_my_data(self, interaction: discord.Interaction):
         view = ConfirmationView(author=interaction.user)
-        await interaction.response.send_message("**Are you absolutely sure?** This will permanently delete all timers and configuration for this server.", view=view, ephemeral=True)
+        await interaction.response.send_message("**Are you absolutely sure?** This will permanently delete all timers and configuration for this server. This action cannot be undone.", view=view, ephemeral=True)
         await view.wait()
         if view.value:
             conn = db_connect()
             conn.cursor().execute("DELETE FROM servers WHERE server_id = ?", (interaction.guild_id,))
             conn.commit()
             conn.close()
+            await interaction.followup.send("All data for this server has been wiped.", ephemeral=True)
+        elif view.value is False:
+             await interaction.followup.send("Deletion cancelled.", ephemeral=True)
 
 # --- Automated Background Task ---
 @tasks.loop(minutes=1)
 async def check_all_boss_windows():
     conn = db_connect()
+    conn.row_factory = sqlite3.Row # Allows accessing columns by name
     cursor = conn.cursor()
-    active_timers = cursor.execute("SELECT server_id, boss_key, start_time, end_time, duration_hours, event_id FROM timer_states WHERE status = 'active'").fetchall()
+    active_timers = cursor.execute("SELECT * FROM timer_states WHERE status = 'active'").fetchall()
     
-    for server_id, boss_key, start_str, end_str, duration, event_id in active_timers:
-        end_time = datetime.fromisoformat(end_str)
+    for timer in active_timers:
+        end_time = datetime.fromisoformat(timer['end_time'])
         if datetime.now(timezone.utc) > end_time:
-            server_config = cursor.execute("SELECT alerts_channel_id, raid_helper_api_key FROM servers WHERE server_id = ?", (server_id,)).fetchone()
+            server_config = cursor.execute("SELECT * FROM servers WHERE server_id = ?", (timer['server_id'],)).fetchone()
             if not server_config: continue
-            
-            alerts_channel_id, encrypted_rh_key = server_config
-            rh_api_key = fernet.decrypt(encrypted_rh_key).decode()
-            config = BOSS_CONFIG[boss_key]
-            new_duration = duration + 4
+
+            rh_api_key = fernet.decrypt(server_config['raid_helper_api_key']).decode()
+            config = BOSS_CONFIG[timer['boss_key']]
+            new_duration = timer['duration_hours'] + 4
 
             if new_duration > 16:
-                cursor.execute("UPDATE timer_states SET status = 'paused' WHERE server_id = ? AND boss_key = ?", (server_id, boss_key))
-                alert_channel = bot.get_channel(alerts_channel_id)
-                if alert_channel: await alert_channel.send(f"🔥 The **{config['name']}** window has exceeded 16h and is now **paused**. Use `/tod {boss_key.lower()}` to reset.")
+                cursor.execute("UPDATE timer_states SET status = 'paused' WHERE server_id = ? AND boss_key = ?", (timer['server_id'], timer['boss_key']))
+                try:
+                    alert_channel = await bot.fetch_channel(server_config['alerts_channel_id'])
+                    await alert_channel.send(f"🔥 The **{config['name']}** window has exceeded 16h and is now **paused**. Use `/tod {timer['boss_key'].lower()}` to reset.")
+                except (discord.NotFound, discord.Forbidden): pass
             else:
-                start_time = datetime.fromisoformat(start_str)
+                start_time = datetime.fromisoformat(timer['start_time'])
                 new_start_time = start_time + timedelta(hours=config['lost_respawn_shift_hours'])
                 new_end_time = new_start_time + timedelta(hours=new_duration)
-                payload = { "name": f"{config['emoji']} {config['name']} Window (LOST - {new_duration}h)", "leader": "BOT", "start": new_start_time.isoformat(), "end": new_end_time.isoformat(), "description": "Previous window missed. Calculating max respawn.", "channel": str(alerts_channel_id), "settings": {"color": "#800000"} }
+                payload = { "name": f"{config['emoji']} {config['name']} Window (LOST - {new_duration}h)", "leader": "BOT", "start": new_start_time.isoformat(), "end": new_end_time.isoformat(), "description": "Previous window missed. Calculating max respawn.", "channel": str(server_config['events_channel_id']), "settings": {"color": "#800000"} }
                 
                 h = {"Authorization": f"Bearer {rh_api_key}", "Content-Type": "application/json"}
-                url = f"https://raid-helper.dev/api/v2/events/{event_id}"
+                url = f"https://raid-helper.dev/api/v2/events/{timer['event_id']}"
                 response = requests.put(url, json=payload, headers=h)
                 
                 if response.status_code == 200:
-                    cursor.execute("UPDATE timer_states SET start_time=?, end_time=?, duration_hours=? WHERE server_id=? AND boss_key=?", (new_start_time.isoformat(), new_end_time.isoformat(), new_duration, server_id, boss_key))
+                    cursor.execute("UPDATE timer_states SET start_time=?, end_time=?, duration_hours=? WHERE server_id=? AND boss_key=?", (new_start_time.isoformat(), new_end_time.isoformat(), new_duration, timer['server_id'], timer['boss_key']))
     conn.commit()
     conn.close()
 

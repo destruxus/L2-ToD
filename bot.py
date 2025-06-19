@@ -152,7 +152,7 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, timestam
     
     existing_event_id = (cursor.execute("SELECT event_id FROM timer_states WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, boss_key.upper())).fetchone() or [None])[0]
     if existing_event_id:
-        stop_payload = {"endTime": int(datetime.now(timezone.utc).timestamp() * 1000)} # Send as milliseconds
+        stop_payload = {"endTime": int(datetime.now(timezone.utc).timestamp())}
         update_url = f"https://raid-helper.dev/api/v2/events/{existing_event_id}"
         requests.patch(url=update_url, json=stop_payload, headers=h)
         await asyncio.sleep(1)
@@ -160,10 +160,11 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, timestam
     duration = config['duration_hours']
     event_start_time = tod_time + timedelta(hours=config['respawn_hours'])
     
+    # --- FINAL PAYLOAD CORRECTION: Use startTime with a standard Unix timestamp in seconds ---
     payload = { 
         "title": f"{config['emoji']} {config['name']} Window", 
         "leaderId": str(interaction.user.id), 
-        "startTime": int(event_start_time.timestamp() * 1000), # Send as milliseconds
+        "startTime": int(event_start_time.timestamp()), # Use precise Unix timestamp in seconds
         "description": f"Timer set by {interaction.user.mention}.\nWindow is open for **{duration} hours**.", 
         "templateId": "standard",
         "advancedSettings": { "duration": duration * 60 }
@@ -177,7 +178,7 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, timestam
         new_event_id = rh_response.get('event', {}).get('id')
         if not new_event_id:
             await interaction.followup.send("❌ Event was created, but I could not get the new Event ID from Raid-Helper's response.", ephemeral=True); conn.close(); return
-        
+
         event_end_time = event_start_time + timedelta(hours=duration)
         cursor.execute("""
             INSERT INTO timer_states (server_id, boss_key, event_id, start_time, end_time, duration_hours, status) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -344,7 +345,7 @@ async def check_all_boss_windows():
             else:
                 start_time = datetime.fromisoformat(timer['start_time'])
                 new_start_time = start_time + timedelta(hours=config['lost_respawn_shift_hours'])
-                payload = { "title": f"{config['emoji']} {config['name']} Window (LOST - {new_duration}h)", "leaderId": str(bot.user.id), "startTime": int(new_start_time.timestamp() * 1000), "description": "Previous window missed. Calculating max respawn.", "templateId": "standard", "advancedSettings": { "duration": new_duration * 60 } }
+                payload = { "title": f"{config['emoji']} {config['name']} Window (LOST - {new_duration}h)", "leaderId": str(bot.user.id), "startTime": int(new_start_time.timestamp()), "description": "Previous window missed. Calculating max respawn.", "templateId": "standard", "advancedSettings": { "duration": new_duration * 60 } }
                 h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
                 url = f"https://raid-helper.dev/api/v2/events/{timer['event_id']}"
                 response = requests.patch(url=url, json=payload, headers=h)
@@ -370,6 +371,4 @@ async def before_check():
 
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:
-        print("FATAL ERROR: DISCORD_BOT_TOKEN is missing from environment variables.")
-    else:
-        bot.run(DISCORD_BOT_TOKEN)
+        print("FATAL ERROR: DISCORD_BOT_TOKEN is missing

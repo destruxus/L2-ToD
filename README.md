@@ -95,9 +95,10 @@ The first time the bot runs, it will create a bot_database.db file. The slash co
 ## 3. Hosting
 For 24/7 operation, you must host the bot on a server.
 
-Recommended: A service like Render on their free tier. You must use their Persistent Disks feature to store the bot_database.db file, preventing data loss on restarts.
+Recommended: A service like Render on their free tier. You must use their Persistent Disks feature to store the bot_database.db file, preventing data loss on restarts. \
 Advanced: A Virtual Private Server (VPS) where you can run the bot as a systemd service for reliability.
-Bot Management
+
+## Bot Management
 Adding or Editing Bosses
 The primary strength of this bot is its easy configuration.
 
@@ -106,7 +107,8 @@ Locate the BOSS_CONFIG dictionary at the top.
 To edit a boss, change its values (e.g., respawn_hours).
 To add a new boss, copy an existing boss block, paste it, and change the key (e.g., "ZAKEN") and all its associated values.
 Save the file and restart the bot for changes to take effect. The /tod subcommands will update automatically.
-First-Time Setup on a New Server
+
+### First-Time Setup on a New Server
 When the bot joins a new server, an administrator must run /tod configure. This will trigger a private DM conversation to securely provide the server's unique settings, which are then saved to the bot's database.
 
 ## License

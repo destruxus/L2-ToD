@@ -150,11 +150,20 @@ class TodCommandGroup(app_commands.Group):
         duration = config['duration_hours']
         event_start_time = tod_time + timedelta(hours=config['respawn_hours'])
         event_end_time = event_start_time + timedelta(hours=duration)
-        payload = { "name": f"{config['emoji']} {config['name']} Window", "leader": interaction.user.name, "start": event_start_time.isoformat(), "end": event_end_time.isoformat(), "description": f"Timer set by {interaction.user.mention}.", "channel": str(events_channel_id), "settings": {"color": config['color']} }
+        
+        # --- CRITICAL FIX: Changed "leader" to "leaderId" and use the user's ID ---
+        payload = { 
+            "name": f"{config['emoji']} {config['name']} Window", 
+            "leaderId": str(interaction.user.id), 
+            "start": event_start_time.isoformat(), 
+            "end": event_end_time.isoformat(), 
+            "description": f"Timer set by {interaction.user.mention}.", 
+            "channel": str(events_channel_id), 
+            "settings": {"color": config['color']} 
+        }
         
         existing_event_id = (cursor.execute("SELECT event_id FROM timer_states WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, boss_key.upper())).fetchone() or [None])[0]
         
-        # --- CRITICAL FIX: The Authorization header does NOT use "Bearer" ---
         h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
         
         if existing_event_id:
@@ -173,7 +182,7 @@ class TodCommandGroup(app_commands.Group):
             conn.commit()
             await interaction.followup.send(f"✅ Timer for **{config['name']}** set! Next window opens <t:{int(event_start_time.timestamp())}:R>.")
         else:
-            await interaction.followup.send(f"❌ Raid-Helper API Error: `{response.status_code}`\n```html\n{response.text[:1500]}\n```\nThis usually means the API Key is incorrect.", ephemeral=True)
+            await interaction.followup.send(f"❌ Raid-Helper API Error: `{response.status_code}`\n```json\n{response.text[:1500]}\n```", ephemeral=True)
         conn.close()
 
     @app_commands.command(name="aq", description="Set the Time of Death for Ant Queen.")
@@ -327,9 +336,18 @@ async def check_all_boss_windows():
                 start_time = datetime.fromisoformat(timer['start_time'])
                 new_start_time = start_time + timedelta(hours=config['lost_respawn_shift_hours'])
                 new_end_time = new_start_time + timedelta(hours=new_duration)
-                payload = { "name": f"{config['emoji']} {config['name']} Window (LOST - {new_duration}h)", "leader": "BOT", "start": new_start_time.isoformat(), "end": new_end_time.isoformat(), "description": "Previous window missed. Calculating max respawn.", "channel": str(server_config['events_channel_id']), "settings": {"color": "#800000"} }
                 
-                # --- CRITICAL FIX: The Authorization header does NOT use "Bearer" ---
+                # --- CRITICAL FIX: Changed "leader" to "leaderId" and use the bot's own ID ---
+                payload = { 
+                    "name": f"{config['emoji']} {config['name']} Window (LOST - {new_duration}h)", 
+                    "leaderId": str(bot.user.id), 
+                    "start": new_start_time.isoformat(), 
+                    "end": new_end_time.isoformat(), 
+                    "description": "Previous window missed. Calculating max respawn.", 
+                    "channel": str(server_config['events_channel_id']), 
+                    "settings": {"color": "#800000"} 
+                }
+                
                 h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
                 url = f"https://raid-helper.dev/api/v2/events/{timer['event_id']}"
                 response = requests.put(url, json=payload, headers=h)

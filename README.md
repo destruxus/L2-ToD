@@ -16,15 +16,16 @@ Admin-Friendly: A simple, DM-based configuration wizard (/tod configure) allows 
 ## User Commands
 ### General Commands
 /tod <boss> \
-Sets the Time of Death (TOD) for the specified boss to the current time. This is the primary command for resetting a timer.
+Sets the Time of Death (TOD) for the specified boss to the current time. This is the primary command for resetting a timer. \
 Example: /tod aq
 
 /tod <boss> timestamp:<timestamp> \
-Sets the TOD for a boss to a specific time. You can get a valid timestamp string by typing /timestamp in any Discord channel.
-wExample: /tod baium timestamp:<t:1718823600:F>
+Sets the TOD for a boss to a specific time. You can get a valid timestamp string by typing /timestamp in any Discord channel. \
+Example: /tod baium timestamp:<t:1718823600:F>
 
 /tod overview \
-Displays a public embed showing the current status of all configured boss timers for the server. Aliases: /tod status, /tod timers.
+Displays a public embed showing the current status of all configured boss timers for the server. \ 
+Aliases: /tod status, /tod timers.
 
 /tod help \
 Sends a private message (visible only to you) detailing all bot features and commands.
@@ -51,26 +52,28 @@ A Discord Bot application with a Token.
 A Raid-Helper API Key for your server.
 2. Setup
 Clone the Repository:
-
+```
 Bash
 
 git clone <your-repository-url>
 cd <your-repository-name>
+```
 Install Dependencies:
-
+```
 Bash
 
 pip install -r requirements.txt
+```
 Generate Encryption Key:
 This bot encrypts sensitive data in its database. You need a master key for this. Run the generate_key.py script (if included) or create one with the following Python code:
 
 Python
-
+```
 from cryptography.fernet import Fernet
 key = Fernet.generate_key()
 print("Copy this key to your .env file:")
 print(key.decode())
-
+```
 ### Configure Environment Variables:
 Create a file named .env in the root directory and fill it out. Do not share this file.
 Code snippet

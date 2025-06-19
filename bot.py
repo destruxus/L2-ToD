@@ -144,8 +144,28 @@ class TodCommandGroup(app_commands.Group):
         tod_time = datetime.now(timezone.utc)
         if timestamp:
             match = re.search(r'<t:(\d+):.*>', timestamp)
-            if match: tod_time = datetime.fromtimestamp(int(match.group(1)), tz=timezone.utc)
-            else: await interaction.followup.send("Invalid timestamp format.", ephemeral=True); conn.close(); return
+            if match:
+                tod_time = datetime.fromtimestamp(int(match.group(1)), tz=timezone.utc)
+            else:
+                await interaction.followup.send("Invalid timestamp format.", ephemeral=True); conn.close(); return
+        
+        h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
+        
+        existing_event_id = (cursor.execute("SELECT event_id FROM timer_states WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, boss_key.upper())).fetchone() or [None])[0]
+        if existing_event_id:
+            new_tod_timestamp_str = f"<t:{int(tod_time.timestamp())}:F>"
+            stop_description = f"**This event has concluded.**\n*A new timer was set with a Time of Death of: {new_tod_timestamp_str}*"
+            stop_payload = {"endTime": int(datetime.now(timezone.utc).timestamp()), "description": stop_description}
+            update_url = f"https://raid-helper.dev/api/v2/events/{existing_event_id}"
+            
+            stop_response = requests.patch(url=update_url, json=stop_payload, headers=h)
+            
+            if stop_response.status_code == 200:
+                print(f"Successfully ended previous event {existing_event_id}.")
+                # --- NEW: Add a small delay to ensure the edit appears first ---
+                await asyncio.sleep(1) 
+            else:
+                print(f"Could not end previous event {existing_event_id}. Status: {stop_response.status_code}. It might have been deleted already.")
 
         duration = config['duration_hours']
         event_start_time = tod_time + timedelta(hours=config['respawn_hours'])
@@ -160,36 +180,27 @@ class TodCommandGroup(app_commands.Group):
             "advancedSettings": { "duration": duration * 60 }
         }
         
-        existing_event_id = (cursor.execute("SELECT event_id FROM timer_states WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, boss_key.upper())).fetchone() or [None])[0]
-        
-        h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
-        
-        # --- FINAL FIX: Use PATCH for updates, POST for creation, with correct URLs ---
-        if existing_event_id:
-            url = f"https://raid-helper.dev/api/v2/events/{existing_event_id}"
-            response = requests.patch(url, json=payload, headers=h) # Use PATCH for updates
-        else:
-            url = f"https://raid-helper.dev/api/v2/servers/{interaction.guild_id}/channels/{events_channel_id}/event"
-            response = requests.post(url, json=payload, headers=h)
+        create_url = f"https://raid-helper.dev/api/v2/servers/{interaction.guild_id}/channels/{events_channel_id}/event"
+        response = requests.post(url=create_url, json=payload, headers=h)
 
-        if response.status_code in [200, 201]:
+        if response.status_code == 201:
             rh_response = response.json()
-            new_event_id = rh_response.get('event', {}).get('id', existing_event_id)
+            new_event_id = rh_response.get('event', {}).get('id')
             
             if not new_event_id:
-                await interaction.followup.send("❌ Event was created/updated, but I could not get the Event ID from Raid-Helper's response.", ephemeral=True)
+                await interaction.followup.send("❌ Event was created, but I could not get the new Event ID from Raid-Helper's response.", ephemeral=True)
                 conn.close()
                 return
 
-            event_end_time = event_start_time + timedelta(hours=duration) # Recalculate end time for storage
+            event_end_time = event_start_time + timedelta(hours=duration)
             cursor.execute("""
                 INSERT INTO timer_states (server_id, boss_key, event_id, start_time, end_time, duration_hours, status) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(server_id, boss_key) DO UPDATE SET event_id=excluded.event_id, start_time=excluded.start_time, end_time=excluded.end_time, duration_hours=excluded.duration_hours, status=excluded.status;
             """, (interaction.guild_id, boss_key.upper(), new_event_id, event_start_time.isoformat(), event_end_time.isoformat(), duration, "active"))
             conn.commit()
-            await interaction.followup.send(f"✅ Timer for **{config['name']}** set! Next window opens <t:{int(event_start_time.timestamp())}:R>.")
+            await interaction.followup.send(f"✅ Previous event concluded. New event for **{config['name']}** created! Next window opens <t:{int(event_start_time.timestamp())}:R>.")
         else:
-            await interaction.followup.send(f"❌ Raid-Helper API Error: `{response.status_code}`\n```json\n{response.text[:1500]}\n```", ephemeral=True)
+            await interaction.followup.send(f"❌ Raid-Helper API Error on new event creation: `{response.status_code}`\n```json\n{response.text[:1500]}\n```", ephemeral=True)
         conn.close()
 
     @app_commands.command(name="aq", description="Set the Time of Death for Ant Queen.")
@@ -354,7 +365,6 @@ async def check_all_boss_windows():
                 }
                 
                 h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
-                # --- CRITICAL FIX: Use PATCH for updates ---
                 url = f"https://raid-helper.dev/api/v2/events/{timer['event_id']}"
                 response = requests.patch(url, json=payload, headers=h)
                 
@@ -389,10 +399,4 @@ async def on_ready():
 
 @check_all_boss_windows.before_loop
 async def before_check():
-    await bot.wait_until_ready()
-
-if __name__ == "__main__":
-    if not DISCORD_BOT_TOKEN:
-        print("FATAL ERROR: DISCORD_BOT_TOKEN is missing from environment variables.")
-    else:
-        bot.run(DISCORD_BOT_TOKEN)
+    await

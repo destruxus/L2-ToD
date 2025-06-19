@@ -163,11 +163,12 @@ class TodCommandGroup(app_commands.Group):
         duration = config['duration_hours']
         event_start_time = tod_time + timedelta(hours=config['respawn_hours'])
         
-        # --- FINAL PAYLOAD CORRECTION: Use startTime with Unix timestamp ---
+        # --- FINAL PAYLOAD CORRECTION: Use date and time strings from UTC object ---
         payload = { 
             "title": f"{config['emoji']} {config['name']} Window", 
             "leaderId": str(interaction.user.id), 
-            "startTime": int(event_start_time.timestamp()), # Use precise Unix timestamp
+            "date": event_start_time.strftime('%Y-%m-%d'), # Use YYYY-MM-DD format
+            "time": event_start_time.strftime('%H:%M'),     # Use HH:MM format (24-hour)
             "description": f"Timer set by {interaction.user.mention}.\nWindow is open for **{duration} hours**.", 
             "templateId": "standard",
             "advancedSettings": { "duration": duration * 60 }
@@ -176,7 +177,6 @@ class TodCommandGroup(app_commands.Group):
         create_url = f"https://raid-helper.dev/api/v2/servers/{interaction.guild_id}/channels/{events_channel_id}/event"
         response = requests.post(url=create_url, json=payload, headers=h)
 
-        # --- FINAL STATUS CODE FIX: Accept both 200 and 201 as success ---
         if response.status_code in [200, 201]:
             rh_response = response.json()
             new_event_id = rh_response.get('event', {}).get('id')
@@ -185,13 +185,16 @@ class TodCommandGroup(app_commands.Group):
                 await interaction.followup.send("❌ Event was created, but I could not get the new Event ID from Raid-Helper's response.", ephemeral=True)
                 conn.close()
                 return
-
+            
+            # Use the start time we calculated for our own database and confirmation message
             event_end_time = event_start_time + timedelta(hours=duration)
+            
             cursor.execute("""
                 INSERT INTO timer_states (server_id, boss_key, event_id, start_time, end_time, duration_hours, status) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(server_id, boss_key) DO UPDATE SET event_id=excluded.event_id, start_time=excluded.start_time, end_time=excluded.end_time, duration_hours=excluded.duration_hours, status=excluded.status;
             """, (interaction.guild_id, boss_key.upper(), new_event_id, event_start_time.isoformat(), event_end_time.isoformat(), duration, "active"))
             conn.commit()
+            
             await interaction.followup.send(f"✅ New event for **{config['name']}** created! Next window opens <t:{int(event_start_time.timestamp())}:R>.")
         else:
             await interaction.followup.send(f"❌ Raid-Helper API Error on new event creation: `{response.status_code}`\n```json\n{response.text[:1500]}\n```", ephemeral=True)
@@ -200,7 +203,7 @@ class TodCommandGroup(app_commands.Group):
     @app_commands.command(name="aq", description="Set the Time of Death for Ant Queen.")
     @app_commands.describe(timestamp="Optional: A specific Discord timestamp for the TOD.")
     async def aq(self, interaction: discord.Interaction, timestamp: str = None): await self._process_tod(interaction, "AQ", timestamp)
-        
+
     @app_commands.command(name="baium", description="Set the Time of Death for Baium.")
     @app_commands.describe(timestamp="Optional: A specific Discord timestamp for the TOD.")
     async def baium(self, interaction: discord.Interaction, timestamp: str = None): await self._process_tod(interaction, "BAIUM", timestamp)
@@ -214,7 +217,6 @@ class TodCommandGroup(app_commands.Group):
     async def reset(self, interaction: discord.Interaction, boss: app_commands.Choice[str]):
         await _process_reset(interaction, boss.value)
 
-    # ... (The other commands like overview, help, configure, etc. remain the same) ...
     @app_commands.command(name="overview", description="Shows the status of all boss timers.")
     async def overview(self, interaction: discord.Interaction):
         if not await self._is_configured(interaction): return
@@ -249,10 +251,10 @@ class TodCommandGroup(app_commands.Group):
     @app_commands.command(name="help", description="Sends a private message explaining all commands.")
     async def help(self, interaction: discord.Interaction):
         embed = discord.Embed(title="L2 Boss Timer Bot Help", color=discord.Color.blue())
-        cmd_list = "".join([f"**`/tod {k.lower()} set`**\n› Sets the Time of Death for {v['name']}.\n\n" for k, v in BOSS_CONFIG.items()])
-        cmd_list += "**`/tod <boss> set timestamp:<timestamp>`**\n› Sets the TOD to a specific time.\n\n**`/tod <boss> reset`**\n› Deletes the current timer for a boss.\n\n**`/tod overview`**\n› Shows the status of all boss timers."
+        cmd_list = "".join([f"**`/tod {k.lower()}`**\n› Respawn: **{v['respawn_hours']}h**, Duration: **{v['duration_hours']}h**.\n\n" for k, v in BOSS_CONFIG.items()])
+        cmd_list += "**`/tod <boss> timestamp:<timestamp>`**\n› Sets the TOD to a specific time.\n\n**`/tod <boss> reset`**\n› Deletes the current timer for a boss.\n\n**`/tod overview`**\n› Shows the status of all boss timers."
         embed.add_field(name="📊 General Commands", value=cmd_list, inline=False)
-        embed.add_field(name="⚙️ Automated Features", value="**1. Lost Window:** If a timer expires, a 'lost' window is calculated automatically by creating a new event.\n**2. Safety Pause:** Automation pauses if a window's duration would exceed 16 hours.", inline=False)
+        embed.add_field(name="⚙️ Automated Features", value="**1. Lost Window:** If a timer expires, a 'lost' window is calculated automatically.\n**2. Safety Pause:** Automation pauses if a window's duration would exceed 16 hours.", inline=False)
         embed.add_field(name="👑 Admin Commands", value="**`/tod configure`**\n› Setup the bot for this server.\n**`/tod wipe_my_data`**\n› Deletes all data for this server.\n**`/tod privacy`**\n› Shows the privacy policy.", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -314,7 +316,7 @@ class TodCommandGroup(app_commands.Group):
     @app_commands.checks.has_permissions(administrator=True)
     async def wipe_my_data(self, interaction: discord.Interaction):
         view = ConfirmationView(author=interaction.user)
-        await interaction.response.send_message("**Are you absolutely sure?** This will permanently delete all timers and configuration for this server. This action cannot be undone.", view=view, ephemeral=True)
+        await interaction.response.send_message("**Are you absolutely sure?** This will permanently delete all timers and configuration for this server.", view=view, ephemeral=True)
         await view.wait()
         if view.value:
             conn = db_connect()
@@ -324,77 +326,3 @@ class TodCommandGroup(app_commands.Group):
             await interaction.followup.send("All data for this server has been wiped.", ephemeral=True)
         elif view.value is False:
              await interaction.followup.send("Deletion cancelled.", ephemeral=True)
-
-# --- Automated Background Task ---
-@tasks.loop(minutes=1)
-async def check_all_boss_windows():
-    conn = db_connect()
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    active_timers = cursor.execute("SELECT * FROM timer_states WHERE status = 'active'").fetchall()
-    
-    for timer in active_timers:
-        end_time = datetime.fromisoformat(timer['end_time'])
-        if datetime.now(timezone.utc) > end_time:
-            server_config = cursor.execute("SELECT * FROM servers WHERE server_id = ?", (timer['server_id'],)).fetchone()
-            if not server_config: continue
-
-            try:
-                rh_api_key = fernet.decrypt(server_config['raid_helper_api_key']).decode()
-            except Exception:
-                print(f"BACKGROUND TASK: Could not decrypt key for server {timer['server_id']}. Skipping.")
-                continue
-
-            config = BOSS_CONFIG[timer['boss_key']]
-            new_duration = timer['duration_hours'] + 4
-
-            if new_duration > 16:
-                cursor.execute("UPDATE timer_states SET status = 'paused' WHERE server_id = ? AND boss_key = ?", (timer['server_id'], timer['boss_key']))
-                try:
-                    alert_channel = await bot.fetch_channel(server_config['alerts_channel_id'])
-                    await alert_channel.send(f"🔥 The **{config['name']}** window has exceeded 16h and is now **paused**. Use `/tod {timer['boss_key'].lower()} set` to reset.")
-                except (discord.NotFound, discord.Forbidden): pass
-            else:
-                start_time = datetime.fromisoformat(timer['start_time'])
-                new_start_time = start_time + timedelta(hours=config['lost_respawn_shift_hours'])
-                
-                payload = { 
-                    "title": f"{config['emoji']} {config['name']} Window (LOST - {new_duration}h)", 
-                    "leaderId": str(bot.user.id), 
-                    "startTime": int(new_start_time.timestamp()), # Use precise Unix timestamp
-                    "description": "Previous window missed. Calculating max respawn.", 
-                    "templateId": "standard",
-                    "advancedSettings": { "duration": new_duration * 60 }
-                }
-                
-                h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
-                url = f"https://raid-helper.dev/api/v2/events/{timer['event_id']}"
-                response = requests.patch(url, json=payload, headers=h)
-                
-                if response.status_code == 200:
-                    new_end_time = new_start_time + timedelta(hours=new_duration)
-                    cursor.execute("UPDATE timer_states SET start_time=?, end_time=?, duration_hours=? WHERE server_id=? AND boss_key=?", (new_start_time.isoformat(), new_end_time.isoformat(), new_duration, timer['server_id'], timer['boss_key']))
-    conn.commit()
-    conn.close()
-
-# --- Bot Startup ---
-@bot.event
-async def on_ready():
-    print(f'Logged in as {bot.user.name} ({bot.user.id})')
-    if not fernet: print("\nWARNING: DATABASE_ENCRYPTION_KEY not set. Bot will run but configuration commands will fail.\n")
-    setup_database()
-    
-    bot.tree.add_command(TodCommandGroup(name="tod", description="L2 Boss Timer Commands"))
-    await bot.tree.sync()
-    print("Slash commands synced.")
-    check_all_boss_windows.start()
-
-@check_all_boss_windows.before_loop
-async def before_check():
-    await bot.wait_until_ready()
-
-if __name__ == "__main__":
-    if not DISCORD_BOT_TOKEN:
-        print("FATAL ERROR: DISCORD_BOT_TOKEN is missing from environment variables.")
-    else:
-        bot.run(DISCORD_BOT_TOKEN)

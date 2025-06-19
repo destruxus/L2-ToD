@@ -151,16 +151,17 @@ class TodCommandGroup(app_commands.Group):
         event_start_time = tod_time + timedelta(hours=config['respawn_hours'])
         event_end_time = event_start_time + timedelta(hours=duration)
         
-        # --- UPDATED PAYLOAD with the basic template ---
+        # --- Using the "standard" template as requested ---
         payload = { 
-            "name": f"{config['emoji']} {config['name']} Window", 
+            "title": f"{config['emoji']} {config['name']} Window", 
             "leaderId": str(interaction.user.id), 
-            "start": event_start_time.isoformat(), 
-            "end": event_end_time.isoformat(), 
-            "description": f"Timer set by {interaction.user.mention}.", 
-            "channel": str(events_channel_id), 
-            "template": "yes-no-maybe", # This tells Raid-Helper to use the basic sign-up template
-            "settings": {"color": config['color']} 
+            "date": event_start_time.strftime('%Y-%m-%d'),
+            "time": event_start_time.strftime('%H:%M'),
+            "description": f"Timer set by {interaction.user.mention}.\nWindow is open for **{duration} hours**.", 
+            "templateId": "standard", # UPDATED
+            "advancedSettings": {
+                "duration": duration * 60 
+            }
         }
         
         existing_event_id = (cursor.execute("SELECT event_id FROM timer_states WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, boss_key.upper())).fetchone() or [None])[0]
@@ -176,8 +177,13 @@ class TodCommandGroup(app_commands.Group):
 
         if response.status_code in [200, 201]:
             rh_response = response.json()
-            new_event_id = rh_response.get('id', existing_event_id)
+            new_event_id = rh_response.get('event', {}).get('id') if rh_response.get('event') else existing_event_id
             
+            if not new_event_id:
+                await interaction.followup.send("❌ Event was created, but I could not get the new Event ID from Raid-Helper's response.", ephemeral=True)
+                conn.close()
+                return
+
             cursor.execute("""
                 INSERT INTO timer_states (server_id, boss_key, event_id, start_time, end_time, duration_hours, status) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(server_id, boss_key) DO UPDATE SET event_id=excluded.event_id, start_time=excluded.start_time, end_time=excluded.end_time, duration_hours=excluded.duration_hours, status=excluded.status;
@@ -196,7 +202,6 @@ class TodCommandGroup(app_commands.Group):
     @app_commands.describe(timestamp="Optional: A specific Discord timestamp for the TOD.")
     async def baium(self, interaction: discord.Interaction, timestamp: str = None): await self._process_tod(interaction, "BAIUM", timestamp)
 
-    # ... (the rest of the commands like overview, help, privacy, configure, wipe_my_data remain the same) ...
     @app_commands.command(name="overview", description="Shows the status of all boss timers.")
     async def overview(self, interaction: discord.Interaction):
         if not await self._is_configured(interaction): return
@@ -341,16 +346,17 @@ async def check_all_boss_windows():
                 new_start_time = start_time + timedelta(hours=config['lost_respawn_shift_hours'])
                 new_end_time = new_start_time + timedelta(hours=new_duration)
                 
-                # --- UPDATED PAYLOAD with the basic template ---
+                # --- Using the "standard" template as requested ---
                 payload = { 
-                    "name": f"{config['emoji']} {config['name']} Window (LOST - {new_duration}h)", 
+                    "title": f"{config['emoji']} {config['name']} Window (LOST - {new_duration}h)", 
                     "leaderId": str(bot.user.id), 
-                    "start": new_start_time.isoformat(), 
-                    "end": new_end_time.isoformat(), 
+                    "date": new_start_time.strftime('%Y-%m-%d'),
+                    "time": new_start_time.strftime('%H:%M'),
                     "description": "Previous window missed. Calculating max respawn.", 
-                    "channel": str(server_config['events_channel_id']),
-                    "template": "yes-no-maybe", # Use the basic template for lost windows too
-                    "settings": {"color": "#800000"} 
+                    "templateId": "standard", # UPDATED
+                    "advancedSettings": {
+                        "duration": new_duration * 60
+                    }
                 }
                 
                 h = {"Authorization": rh_api_key, "Content-Type": "application/json"}

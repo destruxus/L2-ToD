@@ -1,5 +1,5 @@
 # L2-ToD
-This is a hobby project to create a discord bot for Lineage 2 game, to allow to trigger on Time of death of raidbosses, and create a event in the raid-helper discord tooling for the next raidboss window.
+This is a hobby project to create a discord bot for the Lineage 2 game, to allow to trigger on Time of death of raidbosses, and create a event in the raid-helper discord tooling for the next raidboss window.
 
 A sophisticated, multi-server Discord bot for tracking Lineage 2 boss respawn timers with precision and automation. Built with Python and discord.py, this bot integrates with Raid-Helper and uses a secure, database-driven backend to provide a robust and scalable timing solution for any number of guilds.
 

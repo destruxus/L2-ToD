@@ -81,7 +81,7 @@ BOSS_CONFIG = {
 
 # --- Discord Bot Setup ---
 intents = discord.Intents.default()
-intents.message_content = True  # Required for reading DM replies in configure command
+intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # --- UI Views ---
@@ -125,7 +125,7 @@ class TodCommandGroup(app_commands.Group):
 
     async def _process_tod(self, interaction: discord.Interaction, boss_key: str, timestamp: str = None):
         if not await self._is_configured(interaction): return
-        await interaction.response.defer(ephemeral=False) # Defer publicly so we can send a public success message
+        await interaction.response.defer(ephemeral=False)
 
         config = BOSS_CONFIG[boss_key.upper()]
         conn = db_connect()
@@ -154,15 +154,13 @@ class TodCommandGroup(app_commands.Group):
         
         existing_event_id = (cursor.execute("SELECT event_id FROM timer_states WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, boss_key.upper())).fetchone() or [None])[0]
         
-        h = {"Authorization": f"Bearer {rh_api_key}", "Content-Type": "application/json"}
+        # --- CRITICAL FIX: The Authorization header does NOT use "Bearer" ---
+        h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
         
-        # --- CRITICAL FIX: Use the correct URL for creating vs. updating ---
         if existing_event_id:
-            # This is an UPDATE, use the event-specific URL
             url = f"https://raid-helper.dev/api/v2/events/{existing_event_id}"
             response = requests.put(url, json=payload, headers=h)
         else:
-            # This is a CREATE, use the new channel-specific URL
             url = f"https://raid-helper.dev/api/v2/servers/{interaction.guild_id}/channels/{events_channel_id}/event"
             response = requests.post(url, json=payload, headers=h)
 
@@ -175,7 +173,7 @@ class TodCommandGroup(app_commands.Group):
             conn.commit()
             await interaction.followup.send(f"✅ Timer for **{config['name']}** set! Next window opens <t:{int(event_start_time.timestamp())}:R>.")
         else:
-            await interaction.followup.send(f"❌ Raid-Helper API Error: `{response.status_code}`\n```html\n{response.text[:1500]}\n```\nCheck API key and channel permissions.", ephemeral=True)
+            await interaction.followup.send(f"❌ Raid-Helper API Error: `{response.status_code}`\n```html\n{response.text[:1500]}\n```\nThis usually means the API Key is incorrect.", ephemeral=True)
         conn.close()
 
     @app_commands.command(name="aq", description="Set the Time of Death for Ant Queen.")
@@ -329,10 +327,10 @@ async def check_all_boss_windows():
                 start_time = datetime.fromisoformat(timer['start_time'])
                 new_start_time = start_time + timedelta(hours=config['lost_respawn_shift_hours'])
                 new_end_time = new_start_time + timedelta(hours=new_duration)
-                
                 payload = { "name": f"{config['emoji']} {config['name']} Window (LOST - {new_duration}h)", "leader": "BOT", "start": new_start_time.isoformat(), "end": new_end_time.isoformat(), "description": "Previous window missed. Calculating max respawn.", "channel": str(server_config['events_channel_id']), "settings": {"color": "#800000"} }
                 
-                h = {"Authorization": f"Bearer {rh_api_key}", "Content-Type": "application/json"}
+                # --- CRITICAL FIX: The Authorization header does NOT use "Bearer" ---
+                h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
                 url = f"https://raid-helper.dev/api/v2/events/{timer['event_id']}"
                 response = requests.put(url, json=payload, headers=h)
                 
@@ -348,7 +346,6 @@ async def on_ready():
     if not fernet: print("\nWARNING: DATABASE_ENCRYPTION_KEY not set. Bot will run but configuration commands will fail.\n")
     setup_database()
 
-    # --- Diagnostic log at startup ---
     print("--- Verifying stored server configurations ---")
     conn = db_connect()
     servers = conn.cursor().execute("SELECT server_id, events_channel_id, alerts_channel_id FROM servers").fetchall()

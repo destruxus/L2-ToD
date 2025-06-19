@@ -149,41 +149,39 @@ class TodCommandGroup(app_commands.Group):
 
         duration = config['duration_hours']
         event_start_time = tod_time + timedelta(hours=config['respawn_hours'])
-        event_end_time = event_start_time + timedelta(hours=duration)
         
-        # --- Using the "standard" template as requested ---
         payload = { 
             "title": f"{config['emoji']} {config['name']} Window", 
             "leaderId": str(interaction.user.id), 
             "date": event_start_time.strftime('%Y-%m-%d'),
             "time": event_start_time.strftime('%H:%M'),
             "description": f"Timer set by {interaction.user.mention}.\nWindow is open for **{duration} hours**.", 
-            "templateId": "standard", # UPDATED
-            "advancedSettings": {
-                "duration": duration * 60 
-            }
+            "templateId": "standard",
+            "advancedSettings": { "duration": duration * 60 }
         }
         
         existing_event_id = (cursor.execute("SELECT event_id FROM timer_states WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, boss_key.upper())).fetchone() or [None])[0]
         
         h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
         
+        # --- FINAL FIX: Use PATCH for updates, POST for creation, with correct URLs ---
         if existing_event_id:
             url = f"https://raid-helper.dev/api/v2/events/{existing_event_id}"
-            response = requests.put(url, json=payload, headers=h)
+            response = requests.patch(url, json=payload, headers=h) # Use PATCH for updates
         else:
             url = f"https://raid-helper.dev/api/v2/servers/{interaction.guild_id}/channels/{events_channel_id}/event"
             response = requests.post(url, json=payload, headers=h)
 
         if response.status_code in [200, 201]:
             rh_response = response.json()
-            new_event_id = rh_response.get('event', {}).get('id') if rh_response.get('event') else existing_event_id
+            new_event_id = rh_response.get('event', {}).get('id', existing_event_id)
             
             if not new_event_id:
-                await interaction.followup.send("❌ Event was created, but I could not get the new Event ID from Raid-Helper's response.", ephemeral=True)
+                await interaction.followup.send("❌ Event was created/updated, but I could not get the Event ID from Raid-Helper's response.", ephemeral=True)
                 conn.close()
                 return
 
+            event_end_time = event_start_time + timedelta(hours=duration) # Recalculate end time for storage
             cursor.execute("""
                 INSERT INTO timer_states (server_id, boss_key, event_id, start_time, end_time, duration_hours, status) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(server_id, boss_key) DO UPDATE SET event_id=excluded.event_id, start_time=excluded.start_time, end_time=excluded.end_time, duration_hours=excluded.duration_hours, status=excluded.status;
@@ -344,26 +342,24 @@ async def check_all_boss_windows():
             else:
                 start_time = datetime.fromisoformat(timer['start_time'])
                 new_start_time = start_time + timedelta(hours=config['lost_respawn_shift_hours'])
-                new_end_time = new_start_time + timedelta(hours=new_duration)
                 
-                # --- Using the "standard" template as requested ---
                 payload = { 
                     "title": f"{config['emoji']} {config['name']} Window (LOST - {new_duration}h)", 
                     "leaderId": str(bot.user.id), 
                     "date": new_start_time.strftime('%Y-%m-%d'),
                     "time": new_start_time.strftime('%H:%M'),
                     "description": "Previous window missed. Calculating max respawn.", 
-                    "templateId": "standard", # UPDATED
-                    "advancedSettings": {
-                        "duration": new_duration * 60
-                    }
+                    "templateId": "standard",
+                    "advancedSettings": { "duration": new_duration * 60 }
                 }
                 
                 h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
+                # --- CRITICAL FIX: Use PATCH for updates ---
                 url = f"https://raid-helper.dev/api/v2/events/{timer['event_id']}"
-                response = requests.put(url, json=payload, headers=h)
+                response = requests.patch(url, json=payload, headers=h)
                 
                 if response.status_code == 200:
+                    new_end_time = new_start_time + timedelta(hours=new_duration)
                     cursor.execute("UPDATE timer_states SET start_time=?, end_time=?, duration_hours=? WHERE server_id=? AND boss_key=?", (new_start_time.isoformat(), new_end_time.isoformat(), new_duration, timer['server_id'], timer['boss_key']))
     conn.commit()
     conn.close()

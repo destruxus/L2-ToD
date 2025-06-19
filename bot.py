@@ -117,7 +117,6 @@ async def _is_configured(interaction: discord.Interaction) -> bool:
     is_conf = conn.cursor().execute("SELECT 1 FROM servers WHERE server_id = ?", (interaction.guild_id,)).fetchone()
     conn.close()
     if not is_conf:
-        # Check if response is already sent before sending another
         if not interaction.response.is_done():
             await interaction.response.send_message("This server has not been configured. An administrator must run `/configure` first.", ephemeral=True)
         else:
@@ -128,34 +127,41 @@ async def _find_channel_by_name(guild: discord.Guild, name: str) -> discord.Text
     return discord.utils.get(guild.text_channels, name=name)
 
 async def _process_tod(interaction: discord.Interaction, boss_key: str, timestamp: str = None):
-    # This function is now only called by other commands after deferring.
+    # --- FINAL RESTRUCTURE: Respond immediately, then edit ---
+    await interaction.response.send_message("Processing your request...", ephemeral=True)
+
     config = BOSS_CONFIG[boss_key.upper()]
     conn = db_connect()
     cursor = conn.cursor()
     server_row = cursor.execute("SELECT events_channel_id, raid_helper_api_key FROM servers WHERE server_id = ?", (interaction.guild_id,)).fetchone()
     events_channel_id, encrypted_rh_key = server_row
-    try: rh_api_key = fernet.decrypt(encrypted_rh_key).decode()
-    except Exception: await interaction.followup.send("Error: Could not decrypt API key. Please re-run `/configure`.", ephemeral=True); conn.close(); return
+    
+    try:
+        rh_api_key = fernet.decrypt(encrypted_rh_key).decode()
+    except Exception:
+        await interaction.edit_original_response(content="Error: Could not decrypt the server's API key. An admin must re-run `/configure`.")
+        conn.close()
+        return
     
     tod_time = datetime.now(timezone.utc)
     if timestamp:
         match = re.search(r'<t:(\d+):.*>', timestamp)
         if match: tod_time = datetime.fromtimestamp(int(match.group(1)), tz=timezone.utc)
-        else: await interaction.followup.send("Invalid timestamp format.", ephemeral=True); conn.close(); return
+        else: await interaction.edit_original_response(content="Invalid timestamp format."); conn.close(); return
     
     h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
     existing_event_id = (cursor.execute("SELECT event_id FROM timer_states WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, boss_key.upper())).fetchone() or [None])[0]
+    
     if existing_event_id:
-        new_tod_timestamp_str = f"<t:{int(tod_time.timestamp())}:F>"
-        stop_description = f"**This event has concluded.**\n*A new timer was set with a Time of Death of: {new_tod_timestamp_str}*"
-        stop_payload = {"endTime": int(datetime.now(timezone.utc).timestamp()), "description": stop_description}
+        stop_payload = {"endTime": int(datetime.now(timezone.utc).timestamp())}
         update_url = f"https://raid-helper.dev/api/v2/events/{existing_event_id}"
         requests.patch(url=update_url, json=stop_payload, headers=h)
         await asyncio.sleep(1)
 
     duration = config['duration_hours']
     event_start_time = tod_time + timedelta(hours=config['respawn_hours'])
-    payload = { "title": f"{config['emoji']} {config['name']} Window", "leaderId": str(interaction.user.id), "date": event_start_time.strftime('%Y-%m-%d'), "time": event_start_time.strftime('%H:%M'), "description": f"Timer set by {interaction.user.mention}.\nWindow is open for **{duration} hours**.", "templateId": "standard", "advancedSettings": { "duration": duration * 60 } }
+    payload = { "title": f"{config['emoji']} {config['name']} Window", "leaderId": str(interaction.user.id), "startTime": int(event_start_time.timestamp()), "description": f"Timer set by {interaction.user.mention}.\nWindow is open for **{duration} hours**.", "templateId": "standard", "advancedSettings": { "duration": duration * 60 } }
+    
     create_url = f"https://raid-helper.dev/api/v2/servers/{interaction.guild_id}/channels/{events_channel_id}/event"
     response = requests.post(url=create_url, json=payload, headers=h)
 
@@ -163,19 +169,27 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, timestam
         rh_response = response.json()
         new_event_id = rh_response.get('event', {}).get('id')
         if not new_event_id:
-            await interaction.followup.send("❌ Event was created, but I could not get the Event ID from Raid-Helper's response.", ephemeral=True); conn.close(); return
-        event_end_time = event_start_time + timedelta(hours=duration)
+            await interaction.edit_original_response(content="❌ Event was created, but I could not get the new Event ID from Raid-Helper's response.")
+            conn.close()
+            return
+
+        actual_start_unix = rh_response.get('event', {}).get('startTime', int(event_start_time.timestamp()))
+        event_end_time = datetime.fromtimestamp(actual_start_unix, tz=timezone.utc) + timedelta(hours=duration)
         cursor.execute("""
             INSERT INTO timer_states (server_id, boss_key, event_id, start_time, end_time, duration_hours, status) VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(server_id, boss_key) DO UPDATE SET event_id=excluded.event_id, start_time=excluded.start_time, end_time=excluded.end_time, duration_hours=excluded.duration_hours, status=excluded.status;
-        """, (interaction.guild_id, boss_key.upper(), new_event_id, event_start_time.isoformat(), event_end_time.isoformat(), duration, "active"))
+        """, (interaction.guild_id, boss_key.upper(), new_event_id, datetime.fromtimestamp(actual_start_unix, tz=timezone.utc).isoformat(), event_end_time.isoformat(), duration, "active"))
         conn.commit()
-        await interaction.followup.send(f"✅ New event for **{config['name']}** created! Next window opens <t:{int(event_start_time.timestamp())}:R>.")
+        
+        # Edit the original "Processing..." message to the final success message
+        await interaction.edit_original_response(content=f"✅ New event for **{config['name']}** created! Next window opens <t:{actual_start_unix}:R>.")
     else:
-        await interaction.followup.send(f"❌ Raid-Helper API Error: `{response.status_code}`\n```json\n{response.text[:1500]}\n```", ephemeral=True)
+        await interaction.edit_original_response(content=f"❌ Raid-Helper API Error: `{response.status_code}`\n```json\n{response.text[:1500]}\n```")
     conn.close()
 
 async def _process_reset(interaction: discord.Interaction, boss_key: str):
+    await interaction.response.defer(ephemeral=True)
+    # ... (rest of reset logic)
     config = BOSS_CONFIG[boss_key.upper()]
     conn = db_connect()
     cursor = conn.cursor()
@@ -199,34 +213,17 @@ async def _process_reset(interaction: discord.Interaction, boss_key: str):
 
 # --- Unified Slash Command ---
 @bot.tree.command(name="tod", description="Main command for boss timers.")
-@app_commands.describe(
-    boss="The boss you want to manage.",
-    action="The action to perform: 'set' a timer or 'reset' it.",
-    timestamp="[Optional] A specific Discord timestamp for the TOD when using the 'set' action."
-)
-@app_commands.choices(
-    boss=[app_commands.Choice(name=v['name'], value=k) for k, v in BOSS_CONFIG.items()],
-    action=[
-        app_commands.Choice(name="Set Timer", value="set"),
-        app_commands.Choice(name="Reset Timer", value="reset")
-    ]
-)
+@app_commands.describe(boss="The boss you want to manage.", action="The action to perform: 'set' a timer or 'reset' it.", timestamp="[Optional] A specific Discord timestamp for the TOD when using the 'set' action.")
+@app_commands.choices(boss=[app_commands.Choice(name=v['name'], value=k) for k, v in BOSS_CONFIG.items()], action=[app_commands.Choice(name="Set Timer", value="set"), app_commands.Choice(name="Reset Timer", value="reset")])
 async def tod(interaction: discord.Interaction, boss: app_commands.Choice[str], action: app_commands.Choice[str], timestamp: str = None):
-    """Handles all boss timer set and reset actions."""
     if not await _is_configured(interaction): return
-
     if action.value == "set":
         await _process_tod(interaction, boss.value, timestamp)
     elif action.value == "reset":
-        # Can't provide a timestamp when resetting
-        if timestamp:
-            await interaction.response.send_message("You cannot provide a timestamp when resetting a timer. Please try again.", ephemeral=True)
-            return
-        # defer() is called inside _process_reset
-        await interaction.response.defer(ephemeral=True) 
+        if timestamp: await interaction.response.send_message("You cannot provide a timestamp when resetting a timer.", ephemeral=True); return
         await _process_reset(interaction, boss.value)
 
-# --- Other Top-Level Commands ---
+# ... (The rest of the code: overview, help, privacy, configure, wipe_my_data, background task, and startup logic remains the same)
 @bot.tree.command(name="overview", description="Shows the status of all boss timers.")
 async def overview(interaction: discord.Interaction):
     if not await _is_configured(interaction): return
@@ -350,15 +347,11 @@ async def check_all_boss_windows():
                 new_start_time = start_time + timedelta(hours=config['lost_respawn_shift_hours'])
                 payload = { "title": f"{config['emoji']} {config['name']} Window (LOST - {new_duration}h)", "leaderId": str(bot.user.id), "date": new_start_time.strftime('%Y-%m-%d'), "time": new_start_time.strftime('%H:%M'), "description": "Previous window missed. Calculating max respawn.", "templateId": "standard", "advancedSettings": { "duration": new_duration * 60 } }
                 h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
-                # A lost window now creates a new event and updates the DB to track it
-                url = f"https://raid-helper.dev/api/v2/servers/{server_config['server_id']}/channels/{server_config['events_channel_id']}/event"
-                response = requests.post(url=url, json=payload, headers=h)
-                if response.status_code == 201:
-                    rh_response = response.json()
-                    new_event_id = rh_response.get('event', {}).get('id')
-                    if new_event_id:
-                        new_end_time = new_start_time + timedelta(hours=new_duration)
-                        cursor.execute("UPDATE timer_states SET event_id=?, start_time=?, end_time=?, duration_hours=? WHERE server_id=? AND boss_key=?", (new_event_id, new_start_time.isoformat(), new_end_time.isoformat(), new_duration, timer['server_id'], timer['boss_key']))
+                url = f"https://raid-helper.dev/api/v2/events/{timer['event_id']}"
+                response = requests.patch(url=url, json=payload, headers=h)
+                if response.status_code == 200:
+                    new_end_time = new_start_time + timedelta(hours=new_duration)
+                    cursor.execute("UPDATE timer_states SET start_time=?, end_time=?, duration_hours=? WHERE server_id=? AND boss_key=?", (new_start_time.isoformat(), new_end_time.isoformat(), new_duration, timer['server_id'], timer['boss_key']))
     conn.commit()
     conn.close()
 

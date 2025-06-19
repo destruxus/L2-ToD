@@ -15,30 +15,30 @@ Admin-Friendly: A simple, DM-based configuration wizard (/tod configure) allows 
 
 ## User Commands
 ### General Commands
-/tod <boss>
+/tod <boss> \
 Sets the Time of Death (TOD) for the specified boss to the current time. This is the primary command for resetting a timer.
-
 Example: /tod aq
-/tod <boss> timestamp:<timestamp>
-Sets the TOD for a boss to a specific time. You can get a valid timestamp string by typing /timestamp in any Discord channel.
 
-Example: /tod baium timestamp:<t:1718823600:F>
-/tod overview
+/tod <boss> timestamp:<timestamp> \
+Sets the TOD for a boss to a specific time. You can get a valid timestamp string by typing /timestamp in any Discord channel.
+wExample: /tod baium timestamp:<t:1718823600:F>
+
+/tod overview \
 Displays a public embed showing the current status of all configured boss timers for the server. Aliases: /tod status, /tod timers.
 
-/tod help
+/tod help \
 Sends a private message (visible only to you) detailing all bot features and commands.
 
-/tod privacy
+/tod privacy \
 Displays the bot's privacy policy, explaining what data is stored and why.
 
 ### Admin-Only Commands
 (Requires "Administrator" permission on the server)
 
-/tod configure
+/tod configure \
 Initiates a private DM conversation to guide you through setting up or updating the bot's required credentials for your server (Channel IDs and Raid-Helper API Key).
 
-/tod wipe_my_data
+/tod wipe_my_data \
 IRREVERSIBLE. Permanently deletes all data associated with your server from the bot's database. A confirmation prompt is required.
 
 ## Self-Hosting & Installation Guide

@@ -160,19 +160,16 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, timestam
     duration = config['duration_hours']
     event_start_time = tod_time + timedelta(hours=config['respawn_hours'])
     
-    description_text = (
-        f"**✅ Window Opens:** <t:{int(event_start_time.timestamp())}:F> (<t:{int(event_start_time.timestamp())}:R>)\n"
-        f"**Window Duration:** {duration} hours\n\n"
-        f"*Timer set by {interaction.user.mention} based on a ToD of <t:{int(tod_time.timestamp())}:T>.*\n"
-        f"*Note: Please use the time in this description as the official time.*"
-    )
+    # --- FINAL PAYLOAD using the Unix timestamp in both date and time fields ---
+    event_unix_timestamp = int(event_start_time.timestamp())
     
     payload = { 
         "title": f"{config['emoji']} {config['name']} Window", 
         "leaderId": str(interaction.user.id),
         "leaderName": interaction.user.display_name,
-        "startTime": int(event_start_time.timestamp()),
-        "description": description_text, 
+        "date": event_unix_timestamp, # Use Unix timestamp here
+        "time": event_unix_timestamp, # and here, as discovered from testing
+        "description": f"Timer set by {interaction.user.mention}.\nWindow is open for **{duration} hours**.", 
         "templateId": "standard",
         "advancedSettings": { "duration": duration * 60 }
     }
@@ -192,7 +189,7 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, timestam
             ON CONFLICT(server_id, boss_key) DO UPDATE SET event_id=excluded.event_id, start_time=excluded.start_time, end_time=excluded.end_time, duration_hours=excluded.duration_hours, status=excluded.status;
         """, (interaction.guild_id, boss_key.upper(), new_event_id, event_start_time.isoformat(), event_end_time.isoformat(), duration, "active"))
         conn.commit()
-        await interaction.followup.send(f"✅ New event for **{config['name']}** created! The correct time is in the event description.")
+        await interaction.followup.send(f"✅ New event for **{config['name']}** created! Next window opens <t:{int(event_start_time.timestamp())}:R>.")
     else:
         await interaction.followup.send(f"❌ Raid-Helper API Error on new event creation: `{response.status_code}`\n```json\n{response.text[:1500]}\n```", ephemeral=True)
     conn.close()
@@ -353,21 +350,28 @@ async def check_all_boss_windows():
                 start_time = datetime.fromisoformat(timer['start_time'])
                 new_start_time = start_time + timedelta(hours=config['lost_respawn_shift_hours'])
                 
-                description_text = (
-                    f"**✅ Window Opens:** <t:{int(new_start_time.timestamp())}:F> (<t:{int(new_start_time.timestamp())}:R>)\n"
-                    f"**Window Duration:** {new_duration} hours\n\n"
-                    f"*This is an automated 'lost window' calculation. Please use this description as the official time.*"
-                )
-                
-                payload = { "title": f"{config['emoji']} {config['name']} Window (LOST - {new_duration}h)", "leaderId": str(bot.user.id), "leaderName": bot.user.display_name, "startTime": int(new_start_time.timestamp()), "description": description_text, "templateId": "standard", "advancedSettings": { "duration": new_duration * 60 } }
+                payload = { 
+                    "title": f"{config['emoji']} {config['name']} Window (LOST - {new_duration}h)", 
+                    "leaderId": str(bot.user.id),
+                    "leaderName": bot.user.display_name,
+                    "date": int(new_start_time.timestamp()),
+                    "time": int(new_start_time.timestamp()),
+                    "description": "Previous window missed. Calculating max respawn.", 
+                    "templateId": "standard", 
+                    "advancedSettings": { "duration": new_duration * 60 } 
+                }
                 
                 h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
-                url = f"https://raid-helper.dev/api/v2/events/{timer['event_id']}"
-                response = requests.patch(url=url, json=payload, headers=h)
+                # "Lost" events should also be created new, not updated.
+                url = f"https://raid-helper.dev/api/v2/servers/{server_config['server_id']}/channels/{server_config['events_channel_id']}/event"
+                response = requests.post(url=url, json=payload, headers=h)
                 
-                if response.status_code == 200:
-                    new_end_time = new_start_time + timedelta(hours=new_duration)
-                    cursor.execute("UPDATE timer_states SET start_time=?, end_time=?, duration_hours=? WHERE server_id=? AND boss_key=?", (new_start_time.isoformat(), new_end_time.isoformat(), new_duration, timer['server_id'], timer['boss_key']))
+                if response.status_code == 201:
+                    rh_response = response.json()
+                    new_event_id = rh_response.get('event', {}).get('id')
+                    if new_event_id:
+                        new_end_time = new_start_time + timedelta(hours=new_duration)
+                        cursor.execute("UPDATE timer_states SET event_id=?, start_time=?, end_time=?, duration_hours=? WHERE server_id=? AND boss_key=?", (new_event_id, new_start_time.isoformat(), new_end_time.isoformat(), new_duration, timer['server_id'], timer['boss_key']))
     conn.commit()
     conn.close()
 

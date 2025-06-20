@@ -70,7 +70,6 @@ def setup_database():
             FOREIGN KEY(server_id) REFERENCES servers(server_id) ON DELETE CASCADE
         );
     """)
-    # --- NEW TABLE for custom, per-server boss definitions ---
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS custom_bosses (
             server_id INTEGER NOT NULL,
@@ -134,17 +133,15 @@ class ConfirmationView(ui.View):
 
 class AddBossModal(ui.Modal, title='Add a New Custom Boss'):
     boss_name = ui.TextInput(label='Boss Name', placeholder='e.g., Valakas')
-    respawn_hours = ui.TextInput(label='Respawn Window Start (in hours)', placeholder='e.g., 192')
-    duration_hours = ui.TextInput(label='Window Duration (in hours)', placeholder='e.g., 8')
+    respawn_hours = ui.TextInput(label='Respawn Window Start (in hours)', placeholder='e.g., 192 or 0.5 for 30 mins')
+    duration_hours = ui.TextInput(label='Window Duration (in hours)', placeholder='e.g., 8 or 0.25 for 15 mins')
     image_url = ui.TextInput(label='Image URL (Optional)', style=discord.TextStyle.long, placeholder='https://i.imgur.com/...', required=False)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            # Validate inputs
             respawn = float(self.respawn_hours.value)
             duration = float(self.duration_hours.value)
             name = self.boss_name.value
-            # Create a short key from the name
             key = "".join(filter(str.isalnum, name)).upper()[:10]
 
             conn = db_connect()
@@ -162,7 +159,6 @@ class AddBossModal(ui.Modal, title='Add a New Custom Boss'):
         except Exception as e:
             await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True)
 
-
 # --- Main Command Logic (Helper Functions) ---
 async def _is_configured(interaction: discord.Interaction) -> bool:
     conn = db_connect()
@@ -176,7 +172,6 @@ async def _is_configured(interaction: discord.Interaction) -> bool:
     return is_conf is not None
 
 async def _get_boss_config(server_id: int, boss_key: str) -> dict | None:
-    # First, try to get from the custom bosses table
     conn = db_connect()
     cursor = conn.cursor()
     cursor.execute("SELECT name, respawn_hours, duration_hours, imageUrl FROM custom_bosses WHERE server_id = ? AND boss_key = ?", (server_id, boss_key.upper()))
@@ -184,24 +179,19 @@ async def _get_boss_config(server_id: int, boss_key: str) -> dict | None:
     conn.close()
 
     if custom_boss:
-        # Construct a config dict similar to the default one
         return {
             "name": custom_boss[0], "respawn_hours": custom_boss[1], "duration_hours": custom_boss[2], 
-            "lost_respawn_shift_hours": custom_boss[1] + 1, "color": "#3498db", "emoji": "🔥",
+            "lost_respawn_shift_hours": custom_boss[1] + (1/60),
+            "color": "#3498db", "emoji": "🔥",
             "imageUrl": custom_boss[3]
         }
     
-    # If not found in custom, fall back to the default config
     return BOSS_CONFIG.get(boss_key.upper())
-
 
 async def _find_channel_by_name(guild: discord.Guild, name: str) -> discord.TextChannel | None:
     return discord.utils.get(guild.text_channels, name=name)
 
 async def _process_tod(interaction: discord.Interaction, boss_key: str, timestamp: str = None):
-    if not await _is_configured(interaction): return
-    await interaction.response.defer(ephemeral=False)
-
     config = await _get_boss_config(interaction.guild_id, boss_key)
     if not config:
         await interaction.followup.send(f"❌ Boss with key `{boss_key}` not found. Please check the spelling or add it with `/boss add`.", ephemeral=True)
@@ -210,13 +200,10 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, timestam
     conn = db_connect()
     cursor = conn.cursor()
     server_row = cursor.execute("SELECT events_channel_id, raid_helper_api_key FROM servers WHERE server_id = ?", (interaction.guild_id,)).fetchone()
-    # ... rest of the function ...
     events_channel_id, encrypted_rh_key = server_row
     
-    try:
-        rh_api_key = fernet.decrypt(encrypted_rh_key).decode()
-    except Exception:
-        await interaction.followup.send("Error: Could not decrypt the server's API key. An admin must re-run `/configure`.", ephemeral=True); conn.close(); return
+    try: rh_api_key = fernet.decrypt(encrypted_rh_key).decode()
+    except Exception: await interaction.followup.send("Error: Could not decrypt the server's API key. An admin must re-run `/configure`.", ephemeral=True); conn.close(); return
     
     tod_time = datetime.now(timezone.utc)
     if timestamp:
@@ -225,7 +212,6 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, timestam
         else: await interaction.followup.send("Invalid timestamp format.", ephemeral=True); conn.close(); return
     
     h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
-    
     existing_event_id = (cursor.execute("SELECT event_id FROM timer_states WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, boss_key.upper())).fetchone() or [None])[0]
     if existing_event_id:
         stop_payload = {"endTime": int(datetime.now(timezone.utc).timestamp())}
@@ -237,20 +223,9 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, timestam
     duration_minutes = int(duration_hours * 60)
     event_start_time = tod_time + timedelta(hours=config['respawn_hours'])
     event_unix_timestamp = int(event_start_time.timestamp())
-    
     duration_text = f"{duration_hours:.0f} hours" if duration_hours >= 1 else f"{duration_minutes} minutes"
     
-    payload = { 
-        "title": f"{config.get('emoji', '🗓️')} {config['name']} Window", 
-        "leaderId": str(interaction.user.id),
-        "leaderName": interaction.user.display_name,
-        "date": event_unix_timestamp,
-        "time": event_unix_timestamp,
-        "description": f"Timer set by {interaction.user.mention}.\nWindow is open for **{duration_text}**.", 
-        "templateId": "standard",
-        "imageUrl": config.get("imageUrl", "none"),
-        "advancedSettings": { "duration": duration_minutes }
-    }
+    payload = { "title": f"{config.get('emoji', '🗓️')} {config['name']} Window", "leaderId": str(interaction.user.id), "leaderName": interaction.user.display_name, "date": event_unix_timestamp, "time": event_unix_timestamp, "description": f"Timer set by {interaction.user.mention}.\nWindow is open for **{duration_text}**.", "templateId": "standard", "imageUrl": config.get("imageUrl", "none"), "advancedSettings": { "duration": duration_minutes } }
     
     create_url = f"https://raid-helper.dev/api/v2/servers/{interaction.guild_id}/channels/{events_channel_id}/event"
     response = requests.post(url=create_url, json=payload, headers=h)
@@ -260,7 +235,6 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, timestam
         new_event_id = rh_response.get('event', {}).get('id')
         if not new_event_id:
             await interaction.followup.send("❌ Event was created, but I could not get the new Event ID from Raid-Helper's response.", ephemeral=True); conn.close(); return
-
         event_end_time = event_start_time + timedelta(hours=duration_hours)
         cursor.execute("""
             INSERT INTO timer_states (server_id, boss_key, event_id, start_time, end_time, duration_hours, status) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -273,8 +247,6 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, timestam
     conn.close()
 
 async def _process_reset(interaction: discord.Interaction, boss_key: str):
-    await interaction.response.defer(ephemeral=True)
-    
     config = await _get_boss_config(interaction.guild_id, boss_key)
     if not config:
         await interaction.followup.send(f"❌ Boss with key `{boss_key}` not found.", ephemeral=True)
@@ -300,20 +272,21 @@ async def _process_reset(interaction: discord.Interaction, boss_key: str):
         await interaction.followup.send(f"❌ Failed to delete the event from Raid-Helper. API Error: `{response.status_code}`\n```json\n{response.text[:1500]}\n```", ephemeral=True)
     conn.close()
 
-
-# --- Autocomplete Functions ---
+# --- Autocomplete Function ---
 async def boss_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    choices = list(BOSS_CONFIG.keys())
+    choices = []
+    for key, config in BOSS_CONFIG.items():
+        choices.append(app_commands.Choice(name=f"{config['name']} (Default)", value=key))
+    
     conn = db_connect()
     cursor = conn.cursor()
-    cursor.execute("SELECT boss_key FROM custom_bosses WHERE server_id = ?", (interaction.guild_id,))
-    custom_choices = [row[0] for row in cursor.fetchall()]
+    cursor.execute("SELECT boss_key, name FROM custom_bosses WHERE server_id = ?", (interaction.guild_id,))
+    custom_choices = [app_commands.Choice(name=f"{name} (Custom)", value=key) for key, name in cursor.fetchall()]
     conn.close()
     choices.extend(custom_choices)
     
     return [
-        app_commands.Choice(name=choice, value=choice)
-        for choice in choices if current.lower() in choice.lower()
+        choice for choice in choices if current.lower() in choice.name.lower() or current.lower() in choice.value.lower()
     ][:25]
 
 # --- Slash Command Definitions ---
@@ -326,23 +299,23 @@ async def tod(interaction: discord.Interaction, boss: str, action: app_commands.
     if action.value == "set": await _process_tod(interaction, boss, timestamp)
     elif action.value == "reset":
         if timestamp: await interaction.response.send_message("You cannot provide a timestamp when resetting a timer.", ephemeral=True); return
+        await interaction.response.defer(ephemeral=True)
         await _process_reset(interaction, boss)
 
-# --- NEW /boss command group ---
-@bot.tree.command(name="boss", description="Manage custom bosses for this server.")
-@app_commands.checks.has_permissions(administrator=True)
-async def boss(interaction: discord.Interaction):
-    # This is a placeholder for the group. Subcommands are defined below.
-    pass
+boss_group = app_commands.Group(name="boss", description="Manage custom bosses for this server.")
 
-@boss.command(name="add", description="Add or update a custom boss timer.")
+@boss_group.command(name="add", description="Add or update a custom boss timer.")
+@app_commands.checks.has_permissions(administrator=True)
 async def boss_add(interaction: discord.Interaction):
+    if not await _is_configured(interaction): return
     await interaction.response.send_modal(AddBossModal())
 
-@boss.command(name="remove", description="Remove a custom boss timer.")
+@boss_group.command(name="remove", description="Remove a custom boss timer.")
 @app_commands.autocomplete(boss_key=boss_autocomplete)
+@app_commands.checks.has_permissions(administrator=True)
 @app_commands.describe(boss_key="The key of the custom boss to remove.")
 async def boss_remove(interaction: discord.Interaction, boss_key: str):
+    if not await _is_configured(interaction): return
     await interaction.response.defer(ephemeral=True)
     conn = db_connect()
     cursor = conn.cursor()
@@ -354,8 +327,9 @@ async def boss_remove(interaction: discord.Interaction, boss_key: str):
         await interaction.followup.send(f"⚠️ No custom boss with the key `{boss_key.upper()}` was found to remove.", ephemeral=True)
     conn.close()
 
-@boss.command(name="list", description="List all default and custom bosses.")
+@boss_group.command(name="list", description="List all default and custom bosses.")
 async def boss_list(interaction: discord.Interaction):
+    if not await _is_configured(interaction): return
     await interaction.response.defer(ephemeral=True)
     embed = discord.Embed(title="Boss Configuration List", color=discord.Color.blue())
     
@@ -373,26 +347,21 @@ async def boss_list(interaction: discord.Interaction):
     
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-
-# ... Other commands like overview, help, etc. remain here ...
 @bot.tree.command(name="overview", description="Shows the status of all boss timers.")
 async def overview(interaction: discord.Interaction):
     if not await _is_configured(interaction): return
     await interaction.response.defer()
     conn = db_connect()
-    timers = conn.cursor().execute("SELECT boss_key, status, start_time, end_time, duration_hours, event_id FROM timer_states WHERE server_id = ?", (interaction.guild_id,)).fetchall()
-    
-    # Also fetch custom boss names
-    custom_boss_names = {row[0]: row[1] for row in conn.cursor().execute("SELECT boss_key, name FROM custom_bosses WHERE server_id = ?", (interaction.guild_id,)).fetchall()}
+    cursor = conn.cursor()
+    timers = cursor.execute("SELECT boss_key, status, start_time, end_time, duration_hours, event_id FROM timer_states WHERE server_id = ?", (interaction.guild_id,)).fetchall()
     conn.close()
-
+    
     embed = discord.Embed(title="Boss Timer Overview", color=discord.Color.dark_gold(), timestamp=datetime.now(timezone.utc))
     embed.set_footer(text=f"Server: {interaction.guild.name}")
     if not timers:
         embed.description = "No timers have been set for this server yet. Use `/tod` to start one."
     
     for boss_key, status, start_str, end_str, duration_hours, event_id in sorted(timers, key=lambda x: x[2]):
-        # Get config from default or custom
         config = await _get_boss_config(interaction.guild_id, boss_key)
         if not config: continue
 
@@ -411,11 +380,10 @@ async def overview(interaction: discord.Interaction):
         embed.add_field(name=f"{config.get('emoji', '🗓️')} {config['name']} - {state}", value=value, inline=False)
     await interaction.followup.send(embed=embed)
 
-
 @bot.tree.command(name="help", description="Sends a private message explaining all bot commands.")
 async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(title="L2 Boss Timer Bot Help", color=discord.Color.blue())
-    cmd_list = "**/tod**\n› The main command to `set` or `reset` a timer for any boss.\n\n"
+    cmd_list = "**/tod**\n› The main command to `set` or `reset` a timer for a specific boss.\n\n"
     cmd_list += "**/boss**\n› Manage custom bosses with `add`, `remove`, and `list`.\n\n"
     cmd_list += "**/overview**\n› Shows the status of all currently active boss timers.\n\n"
     cmd_list += "**/help**\n› Shows this help message."
@@ -526,7 +494,7 @@ async def check_all_boss_windows():
                 h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
                 url = f"https://raid-helper.dev/api/v2/servers/{server_config['server_id']}/channels/{server_config['events_channel_id']}/event"
                 response = requests.post(url=url, json=payload, headers=h)
-                if response.status_code == 201:
+                if response.status_code in [200, 201]:
                     rh_response = response.json()
                     new_event_id = rh_response.get('event', {}).get('id')
                     if new_event_id:
@@ -542,14 +510,8 @@ async def on_ready():
     if not fernet: print("\nWARNING: DATABASE_ENCRYPTION_KEY not set. Bot will run but configuration commands will fail.\n")
     setup_database()
     
-    # Add commands to the tree
-    bot.tree.add_command(tod)
-    bot.tree.add_command(overview)
-    bot.tree.add_command(help_command)
-    bot.tree.add_command(privacy)
-    bot.tree.add_command(configure)
-    bot.tree.add_command(wipe_my_data)
-    bot.tree.add_command(boss)
+    # Add the command group/commands to the tree
+    bot.tree.add_command(boss_group)
 
     await bot.tree.sync()
     print("Slash commands synced.")

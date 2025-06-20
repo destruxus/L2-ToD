@@ -1,7 +1,7 @@
-L2 Multi-Boss Timer Bot
+# L2 Time of Death Timer Bot
 A sophisticated, multi-server Discord bot for tracking Lineage 2 boss respawn timers with precision and automation. Built with Python and discord.py, this bot integrates with Raid-Helper and uses a secure, database-driven backend to provide a robust and scalable timing solution for any number of guilds.
 
-Key Features
+##Key Features
 Multi-Boss & Customization: Track default bosses (Ant Queen, Baium) and add your own server-specific custom bosses with unique timers and images.
 
 Slash Command Interface: All commands are modern, intuitive slash commands (e.g., /tod, /boss, /overview).
@@ -16,8 +16,8 @@ Smart Automation Pause: To prevent infinite extensions, the automation for any b
 
 Admin-Friendly: A simple, DM-based configuration wizard (/configure) allows server owners to set up the bot without needing to touch any code.
 
-User Commands
-General Commands
+## User Commands
+### General Commands
 /tod boss:<boss> action:<action> [timestamp:<timestamp>]
 The primary command for all timer actions.
 
@@ -46,7 +46,7 @@ Displays a public embed showing the current status of all configured boss timers
 /help
 Sends a private message (visible only to you) detailing all bot features and commands.
 
-Admin-Only Commands
+### Admin-Only Commands
 (Requires "Administrator" permission on the server)
 
 /configure
@@ -58,10 +58,10 @@ IRREVERSIBLE. Permanently deletes all configuration and timers associated with y
 /privacy
 Displays the bot's privacy policy.
 
-Self-Hosting & Installation Guide
+## Self-Hosting & Installation Guide
 Follow these steps to host your own instance of the bot.
 
-1. Prerequisites
+### 1. Prerequisites
 Python 3.8+
 
 A Git client
@@ -70,24 +70,24 @@ A Discord Bot application with a Token.
 
 The Message Content Intent enabled for your bot in the Discord Developer Portal.
 
-2. Project Setup
+### 2. Project Setup
 Clone the Repository:
-
+```
 git clone <your-repository-url>
 cd <your-repository-name>
-
+```
 Create a Virtual Environment:
-
+```
 python -m venv venv
 # On Windows
 .\venv\Scripts\Activate.ps1
 # On macOS/Linux
 source venv/bin/activate
-
+```
 Install Dependencies:
-
+```
 pip install -r requirements.txt
-
+```
 Generate Encryption Key:
 This bot encrypts sensitive data. You need a master key for this. Run this command in your terminal:
 
@@ -97,14 +97,14 @@ Copy the long string it outputs.
 
 Configure Environment Variables:
 Create a file named .env in the root directory. This file must not be committed to Git.
-
+```
 # Your Discord Bot's Token
 DISCORD_BOT_TOKEN="PASTE_YOUR_DISCORD_BOT_TOKEN_HERE"
 
 # The master key you generated in the previous step
 DATABASE_ENCRYPTION_KEY="PASTE_YOUR_GENERATED_ENCRYPTION_KEY_HERE"
-
-3. Hosting on Render
+```
+### 3. Hosting on Render
 For 24/7 operation, a free service like Render is recommended.
 
 Push to GitHub: Create a private GitHub repository and push your project files (bot.py, requirements.txt, .gitignore, LICENSE).
@@ -119,10 +119,14 @@ Name: Give your bot a unique name.
 
 Runtime: Python 3.
 
-Build Command: pip install -r requirements.txt
-
-Start Command: python bot.py
-
+Build Command: 
+```
+pip install -r requirements.txt
+```
+Start Command: 
+```
+python bot.py
+```
 Instance Type: Free.
 
 Add Secrets:
@@ -157,7 +161,8 @@ Value: /data/bot_database.db
 
 Deploy: Click "Create Background Worker". The bot will build and start.
 
-License
+## License
 This project is licensed under the GNU Affero General Public License v3.0. A copy of the license is included in the LICENSE file in this repository. In short, any modifications to this software that are run on a network must also have their source code made available to users under the same license.
-
+```
 Copyright (C) 2025 Destruxus
+```

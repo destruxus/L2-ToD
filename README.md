@@ -1,7 +1,7 @@
 # L2 Time of Death Timer Bot
 A sophisticated, multi-server Discord bot for tracking Lineage 2 boss respawn timers with precision and automation. Built with Python and discord.py, this bot integrates with Raid-Helper and uses a secure, database-driven backend to provide a robust and scalable timing solution for any number of guilds.
 
-##Key Features
+## Key Features
 Multi-Boss & Customization: Track default bosses (Ant Queen, Baium) and add your own server-specific custom bosses with unique timers and images.
 
 Slash Command Interface: All commands are modern, intuitive slash commands (e.g., /tod, /boss, /overview).

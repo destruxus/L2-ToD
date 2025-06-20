@@ -1,4 +1,4 @@
-# L2 Multi-Boss Timer Bot
+# L2 Time of Death Timer Bot
 # A Discord bot for tracking Lineage 2 boss respawn timers.
 # Copyright (C) 2025  Destruxus
 #

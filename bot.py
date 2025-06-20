@@ -403,4 +403,3 @@ if __name__ == "__main__":
         print("FATAL ERROR: DISCORD_BOT_TOKEN is missing from environment variables.")
     else:
         bot.run(DISCORD_BOT_TOKEN)
-�

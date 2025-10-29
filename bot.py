@@ -98,14 +98,14 @@ def setup_database():
         cursor.execute("ALTER TABLE servers ADD COLUMN lost_window_enabled BOOLEAN NOT NULL DEFAULT 1;")
     except sqlite3.OperationalError:
         pass # Column already exists
-        
+
     conn.commit()
     conn.close()
 
 # --- Central Boss Configuration Template (Defaults) ---
 BOSS_CONFIG = {
-    "AQ": { 
-        "name": "Ant Queen", "respawn_hours": 17, "duration_hours": 4, 
+    "AQ": {
+        "name": "Ant Queen", "respawn_hours": 17, "duration_hours": 4,
         "lost_respawn_shift_hours": 18, "color": "#e74c3c", "emoji": "🐜",
         "imageUrl": "https://cdn.discordapp.com/attachments/1360048329811165204/1374070282959978638/1fc1abd4-9dae-4b8d-ba4c-9c185ddb2644.i4g.png?ex=6858e06c&is=68578eec&hm=eb596e19bd3c7feded8cd687ea2a41701c8662c1c5d9332a90ad410d0a85155b&"
     }
@@ -192,7 +192,7 @@ class AddBossModal(ui.Modal, title='Add a New Custom Boss'):
                 INSERT INTO custom_bosses (server_id, boss_key, name, respawn_hours, duration_hours, imageUrl) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(server_id, boss_key) DO UPDATE SET name=excluded.name, respawn_hours=excluded.respawn_hours, duration_hours=excluded.duration_hours, imageUrl=excluded.imageUrl
             """, (interaction.guild_id, key, name, respawn, duration, self.image_url.value or None))
-            
+
             cursor.execute("""
                 INSERT INTO boss_settings (server_id, boss_key, events_channel_id, voice_channel_id) VALUES (?, ?, ?, ?)
                 ON CONFLICT(server_id, boss_key) DO UPDATE SET events_channel_id=excluded.events_channel_id, voice_channel_id=excluded.voice_channel_id
@@ -200,7 +200,7 @@ class AddBossModal(ui.Modal, title='Add a New Custom Boss'):
 
             conn.commit()
             conn.close()
-            
+
             await interaction.followup.send(f"✅ Custom boss **{name}** (`{key}`) has been added/updated!", ephemeral=True)
         except ValueError:
             await interaction.followup.send("❌ Error: Respawn and Duration must be valid numbers.", ephemeral=True)
@@ -227,10 +227,10 @@ async def _get_boss_config(server_id: Optional[int], boss_key: str) -> Optional[
     cursor = conn.cursor()
     cursor.execute("SELECT name, respawn_hours, duration_hours, imageUrl FROM custom_bosses WHERE server_id = ? AND boss_key = ?", (server_id, boss_key.upper()))
     custom_boss = cursor.fetchone()
-    
+
     if custom_boss:
         base_config = {
-            "name": custom_boss[0], "respawn_hours": custom_boss[1], "duration_hours": custom_boss[2], 
+            "name": custom_boss[0], "respawn_hours": custom_boss[1], "duration_hours": custom_boss[2],
             "lost_respawn_shift_hours": custom_boss[1] + (1/60), "color": "#3498db", "emoji": "🔥",
             "imageUrl": custom_boss[3]
         }
@@ -248,14 +248,14 @@ async def _get_boss_config(server_id: Optional[int], boss_key: str) -> Optional[
     if channel_settings:
         base_config['events_channel_id'] = channel_settings[0]
         base_config['voice_channel_id'] = channel_settings[1]
-    
+
     return base_config
 
 async def _find_channel_by_name(guild: discord.Guild, name: str, channel_type: discord.ChannelType) -> Optional[discord.abc.GuildChannel | discord.Thread]:
     channel = discord.utils.get(guild.channels, name=name, type=channel_type)
     if channel:
         return channel
-    
+
     if channel_type == discord.ChannelType.text:
         for thread in guild.threads:
             if thread.name == name:
@@ -277,7 +277,7 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, timestam
     cursor = conn.cursor()
     server_row = cursor.execute("SELECT raid_helper_api_key FROM servers WHERE server_id = ?", (interaction.guild_id,)).fetchone()
     encrypted_rh_key = server_row[0]
-    
+
     if not fernet:
         await interaction.edit_original_response(content="Error: Encryption is not configured. An admin must set the DATABASE_ENCRYPTION_KEY and re-run `/configure`.")
         conn.close()
@@ -288,7 +288,7 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, timestam
         await interaction.edit_original_response(content="Error: Could not decrypt the server's API key. An admin must re-run `/configure`.")
         conn.close()
         return
-    
+
     tod_time = datetime.now(timezone.utc)
     if timestamp:
         match = re.search(r'<t:(\d+):.*>', timestamp)
@@ -313,7 +313,7 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, timestam
     event_start_time = tod_time + timedelta(hours=config['respawn_hours'])
     event_unix_timestamp = int(event_start_time.timestamp())
     duration_text = f"{duration_hours:.0f} hours" if duration_hours >= 1 else f"{duration_minutes} minutes"
-    
+
     payload = {"title": f"{config.get('emoji', '🗓️')} {config['name']} Window", "leaderId": str(interaction.user.id), "leaderName": interaction.user.display_name, "date": event_unix_timestamp, "time": event_unix_timestamp, "description": f"Timer set by {interaction.user.mention}.\nWindow is open for **{duration_text}**.", "templateId": "standard", "advancedSettings": {"duration": duration_minutes, "image": config.get("imageUrl", "none"), "voice_channel": str(config.get('voice_channel_id')) if config.get('voice_channel_id') else "none"}}
 
     create_url = f"https://raid-helper.dev/api/v2/servers/{interaction.guild_id}/channels/{config['events_channel_id']}/event"
@@ -400,7 +400,7 @@ async def _process_correction(interaction: discord.Interaction, boss_key: str, a
     conn = db_connect()
     cursor = conn.cursor()
     timer_data = cursor.execute("SELECT event_id, start_time, duration_hours FROM timer_states WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, boss_key.upper())).fetchone()
-    
+
     if not timer_data: conn.close(); return await interaction.followup.send(f"There is no active timer for **{config['name']}** to correct.", ephemeral=True)
 
     event_id, start_time_iso, duration_hours = timer_data
@@ -409,10 +409,10 @@ async def _process_correction(interaction: discord.Interaction, boss_key: str, a
     new_unix_timestamp = int(new_start_time.timestamp())
 
     payload = {"date": new_unix_timestamp, "time": new_unix_timestamp}
-    
+
     server_row = cursor.execute("SELECT raid_helper_api_key FROM servers WHERE server_id = ?", (interaction.guild_id,)).fetchone()
     encrypted_rh_key = server_row[0]
-    
+
     if not fernet:
         await interaction.followup.send("Error: Encryption is not configured. An admin must set the DATABASE_ENCRYPTION_KEY and re-run `/configure`.", ephemeral=True)
         conn.close()
@@ -447,14 +447,14 @@ async def boss_autocomplete(interaction: discord.Interaction, current: str) -> l
     choices = []
     for key, config in BOSS_CONFIG.items():
         choices.append(app_commands.Choice(name=f"{config['name']} (Default)", value=key))
-    
+
     conn = db_connect()
     cursor = conn.cursor()
     cursor.execute("SELECT boss_key, name FROM custom_bosses WHERE server_id = ?", (interaction.guild_id,))
     custom_choices = [app_commands.Choice(name=f"{name} (Custom)", value=key) for key, name in cursor.fetchall()]
     conn.close()
     choices.extend(custom_choices)
-    
+
     return [
         choice for choice in choices if current.lower() in choice.name.lower() or current.lower() in choice.value.lower()
     ][:25]
@@ -549,7 +549,7 @@ async def overview(interaction: discord.Interaction):
     cursor = conn.cursor()
     timers = cursor.execute("SELECT boss_key, status, start_time, end_time, duration_hours, event_id FROM timer_states WHERE server_id = ?", (interaction.guild_id,)).fetchall()
     conn.close()
-    
+
     embed = discord.Embed(title="Boss Timer Overview", color=discord.Color.dark_gold(), timestamp=datetime.now(timezone.utc))
     if interaction.guild is not None:
         embed.set_footer(text=f"Server: {interaction.guild.name}")
@@ -557,14 +557,14 @@ async def overview(interaction: discord.Interaction):
         embed.set_footer(text="Server: Unknown")
     if not timers:
         embed.description = "No timers have been set for this server yet. Use `/tod <boss> set` to start one."
-    
+
     for boss_key, status, start_str, end_str, duration_hours, event_id in sorted(timers, key=lambda x: x[2]):
         config = await _get_boss_config(interaction.guild_id, boss_key)
         if not config: continue
 
         start_time, end_time, now = datetime.fromisoformat(start_str), datetime.fromisoformat(end_str), datetime.now(timezone.utc)
         event_url = f"https://raid-helper.dev/event/{interaction.guild_id}/{event_id}"
-        
+
         value = f"› [View Event]({event_url})"
         if status == "paused": state, value = "🔴 Paused", f"*Window exceeded 16h.*\n{value}"
         elif now > end_time: state, value = "⚪ Window Closed", f"*Awaiting automated update.*\n{value}"
@@ -604,12 +604,12 @@ async def configure(interaction: discord.Interaction):
     await interaction.response.send_message("I've sent you a DM to start the configuration.", ephemeral=True)
     try: dm_channel = await interaction.user.create_dm()
     except discord.Forbidden: return await interaction.followup.send("I couldn't send you a DM. Please check your server privacy settings.", ephemeral=True)
-    
-    questions = { 
+
+    questions = {
         "alerts_channel_id": "What is the exact **name** of the channel for bot alerts (e.g. 'lost window' messages)?",
         "aq_events_channel_id": "What is the exact **name** of the text channel for **Ant Queen** events?",
         "aq_voice_channel_id": "What is the exact **name** of the voice channel for **Ant Queen**? (Type `none` if not needed)",
-        "raid_helper_api_key": "Finally, what is your **Raid-Helper API Key**?" 
+        "raid_helper_api_key": "Finally, what is your **Raid-Helper API Key**?"
     }
     answers = {}
 
@@ -622,7 +622,7 @@ async def configure(interaction: discord.Interaction):
             msg = await bot.wait_for('message', timeout=300.0, check=check)
             reply_content = msg.content.strip()
             if reply_content.lower() == 'cancel': return await dm_channel.send("Configuration cancelled.")
-            
+
             if "channel" in key:
                 if reply_content.lower() == 'none' and 'voice' in key:
                     answers[key] = None
@@ -633,7 +633,7 @@ async def configure(interaction: discord.Interaction):
                 if interaction.guild is None:
                     return await dm_channel.send("❌ Could not determine the server context. Configuration cancelled.")
                 target_channel = await _find_channel_by_name(interaction.guild, reply_content, channel_type)
-                
+
                 if not target_channel: return await dm_channel.send(f"❌ I could not find a {'voice' if channel_type == discord.ChannelType.voice else 'text'} channel named `#{reply_content}`. Configuration cancelled.")
                 answers[key] = target_channel.id
                 await dm_channel.send(f"✅ Found it! I will use `#{target_channel.name}`.")
@@ -641,7 +641,7 @@ async def configure(interaction: discord.Interaction):
                 answers[key] = reply_content
                 await dm_channel.send("✅ API Key has been recorded.")
         except asyncio.TimeoutError: return await dm_channel.send("Configuration timed out.")
-    
+
     try:
         encrypted_key = fernet.encrypt(answers['raid_helper_api_key'].encode())
         conn = db_connect()
@@ -650,12 +650,12 @@ async def configure(interaction: discord.Interaction):
             INSERT INTO servers (server_id, alerts_channel_id, raid_helper_api_key) VALUES (?, ?, ?)
             ON CONFLICT(server_id) DO UPDATE SET alerts_channel_id=excluded.alerts_channel_id, raid_helper_api_key=excluded.raid_helper_api_key;
         """, (interaction.guild_id, answers['alerts_channel_id'], encrypted_key))
-        
+
         cursor.execute("""
             INSERT INTO boss_settings (server_id, boss_key, events_channel_id, voice_channel_id) VALUES (?, ?, ?, ?)
             ON CONFLICT(server_id, boss_key) DO UPDATE SET events_channel_id=excluded.events_channel_id, voice_channel_id=excluded.voice_channel_id;
         """, (interaction.guild_id, "AQ", answers['aq_events_channel_id'], answers['aq_voice_channel_id']))
-        
+
         conn.commit(); conn.close()
         await dm_channel.send("✅ **Configuration saved securely!**")
     except Exception as e: await dm_channel.send(f"❌ **Error saving configuration!** Check that your inputs are correct.\n`{e}`")
@@ -685,13 +685,13 @@ async def check_all_boss_windows():
         if datetime.now(timezone.utc) > end_time:
             server_config = cursor.execute("SELECT * FROM servers WHERE server_id = ?", (timer['server_id'],)).fetchone()
             if not server_config or not server_config['lost_window_enabled']: continue
-            
+
             if not fernet:
                 print(f"BACKGROUND TASK: Encryption suite not initialized. Skipping server {timer['server_id']}.")
                 continue
             try: rh_api_key = fernet.decrypt(server_config['raid_helper_api_key']).decode()
             except Exception: print(f"BACKGROUND TASK: Could not decrypt key for server {timer['server_id']}. Skipping."); continue
-            
+
             config = await _get_boss_config(timer['server_id'], timer['boss_key'])
             if not config or 'events_channel_id' not in config: continue
 
@@ -708,16 +708,16 @@ async def check_all_boss_windows():
                 start_time = datetime.fromisoformat(timer['start_time'])
                 new_start_time = start_time + timedelta(hours=config['lost_respawn_shift_hours'])
                 new_event_unix_timestamp = int(new_start_time.timestamp())
-                
-                payload = { 
-                    "title": f"{config.get('emoji', '🗓️')} {config['name']} Window (LOST - {new_duration_hours:.0f}h)", 
+
+                payload = {
+                    "title": f"{config.get('emoji', '🗓️')} {config['name']} Window (LOST - {new_duration_hours:.0f}h)",
                     "leaderId": str(bot.user.id) if bot.user else "0",
                     "leaderName": bot.user.name if bot.user else "Bot",
                     "date": new_event_unix_timestamp,
                     "time": new_event_unix_timestamp,
-                    "description": "Previous window missed. Calculating max respawn.", 
-                    "templateId": "standard", 
-                    "advancedSettings": {"duration": int(new_duration_hours * 60), "image": config.get("imageUrl", "none"), "voice_channel": str(config.get('voice_channel_id')) if config.get('voice_channel_id') else "none"} 
+                    "description": "Previous window missed. Calculating max respawn.",
+                    "templateId": "standard",
+                    "advancedSettings": {"duration": int(new_duration_hours * 60), "image": config.get("imageUrl", "none"), "voice_channel": str(config.get('voice_channel_id')) if config.get('voice_channel_id') else "none"}
                 }
                 h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
                 url = f"https://raid-helper.dev/api/v2/servers/{server_config['server_id']}/channels/{config['events_channel_id']}/event"
@@ -745,7 +745,7 @@ async def on_ready():
         print('Logged in, but bot.user is None.')
     if not fernet: print("\nWARNING: DATABASE_ENCRYPTION_KEY not set. Bot will run but configuration commands will fail.\n")
     setup_database()
-    
+
     bot.tree.add_command(tod_group)
     bot.tree.add_command(boss_group)
     bot.tree.add_command(options_group)

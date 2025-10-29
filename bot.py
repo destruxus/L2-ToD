@@ -138,7 +138,7 @@ class ConfirmationView(ui.View):
         await interaction.response.edit_message(view=self)
 
     @ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: ui.Button):
+    async def cancel(self, interaction: discord.Interaction, button: ui.Button):  # pylint: disable=unused-argument
         self.value = False
         self.stop()
         await interaction.response.edit_message(content="Action cancelled.", view=None)
@@ -704,7 +704,6 @@ async def check_all_boss_windows():
                         await alert_channel.send(f"🔥 The **{config['name']}** window has exceeded 16h and is now **paused**. Use `/tod <boss> set` to reset.")
                 except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
                     print(f"BACKGROUND TASK: Could not send alert to channel {server_config['alerts_channel_id']}: {e}")
-                    pass
             else:
                 start_time = datetime.fromisoformat(timer['start_time'])
                 new_start_time = start_time + timedelta(hours=config['lost_respawn_shift_hours'])

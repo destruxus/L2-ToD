@@ -11,6 +11,8 @@ disable = [
     "C0114",  # Missing module docstring
     "C0115",  # Missing class docstring
     "C0116",  # Missing function docstring
+    "E0401",  # Unable to import (false positives)
+    "W0718",  # Catching too general exception
 ]
 
 [tool.black]

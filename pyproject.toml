@@ -3,10 +3,12 @@ python_version = "3.10"
 warn_return_any = false
 warn_unused_configs = true
 ignore_missing_imports = true
+disable_error_code = ["var-annotated"]
 
 [tool.pylint.messages_control]
 max-line-length = 200
 disable = [
+    "C0103",  # Invalid name (constant naming)
     "C0301",  # Line too long
     "C0114",  # Missing module docstring
     "C0115",  # Missing class docstring
@@ -14,6 +16,7 @@ disable = [
     "C0321",  # Multiple statements on one line
     "C0411",  # Wrong import order
     "E0401",  # Unable to import (false positives)
+    "W0221",  # Arguments differ (Discord.py method overrides)
     "W0718",  # Catching too general exception
     "R0903",  # Too few public methods
     "R0911",  # Too many return statements

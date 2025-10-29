@@ -1,0 +1,18 @@
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = false
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pylint.messages_control]
+max-line-length = 200
+disable = [
+    "C0301",  # Line too long
+    "C0114",  # Missing module docstring
+    "C0115",  # Missing class docstring
+    "C0116",  # Missing function docstring
+]
+
+[tool.black]
+line-length = 200
+target-version = ['py310']

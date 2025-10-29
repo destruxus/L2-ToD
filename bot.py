@@ -143,7 +143,7 @@ class ConfirmationView(ui.View):
         self.stop()
         await interaction.response.edit_message(content="Action cancelled.", view=None)
 
-class AddBossModal(ui.Modal, title='Add a New Custom Boss'):
+class AddBossModal(ui.Modal, title='Add a New Custom Boss'):  # type: ignore[call-arg]
     boss_name = ui.TextInput(label='Boss Name', placeholder='e.g., Valakas')
     respawn_hours = ui.TextInput(label='Respawn Window Start (in hours)', placeholder='e.g., 192 or 0.5 for 30 mins')
     duration_hours = ui.TextInput(label='Window Duration (in hours)', placeholder='e.g., 8 or 0.25 for 15 mins')
@@ -611,7 +611,7 @@ async def configure(interaction: discord.Interaction):
         "aq_voice_channel_id": "What is the exact **name** of the voice channel for **Ant Queen**? (Type `none` if not needed)",
         "raid_helper_api_key": "Finally, what is your **Raid-Helper API Key**?"
     }
-    answers = {}
+    answers: dict[str, int | str | None] = {}
 
     guild_name = interaction.guild.name if interaction.guild else "this server"
     await dm_channel.send(f"👋 Let's configure the bot for **{guild_name}**. You can type `cancel` at any time to stop.")
@@ -643,7 +643,9 @@ async def configure(interaction: discord.Interaction):
         except asyncio.TimeoutError: return await dm_channel.send("Configuration timed out.")
 
     try:
-        encrypted_key = fernet.encrypt(answers['raid_helper_api_key'].encode())
+        api_key = answers['raid_helper_api_key']
+        assert isinstance(api_key, str)
+        encrypted_key = fernet.encrypt(api_key.encode())
         conn = db_connect()
         cursor = conn.cursor()
         cursor.execute("""

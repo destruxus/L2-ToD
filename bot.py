@@ -120,7 +120,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 class ConfirmationView(ui.View):
     def __init__(self, author: discord.abc.User):
         super().__init__(timeout=60)
-        self.value = None
+        self.value: Optional[bool] = None
         self.author = author
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -404,7 +404,6 @@ async def _process_correction(interaction: discord.Interaction, boss_key: str, a
     if not timer_data: conn.close(); return await interaction.followup.send(f"There is no active timer for **{config['name']}** to correct.", ephemeral=True)
 
     event_id, start_time_iso, duration_hours = timer_data
-    event_id, start_time_iso, duration_hours = timer_data # type: ignore
     current_start_time = datetime.fromisoformat(start_time_iso)
     new_start_time = current_start_time + timedelta(minutes=minutes)
     new_unix_timestamp = int(new_start_time.timestamp())

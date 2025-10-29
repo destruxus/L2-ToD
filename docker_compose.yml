@@ -1,0 +1,18 @@
+version: '3.8'
+services:
+  l2-tod-timer-bot:
+    # Build the image from the Dockerfile in the current directory
+    build: .
+    # Always restart the bot if it crashes
+    restart: always
+    # Securely load the secrets from the .env file
+    env_file:
+      - .env
+    # Create a persistent volume for the database
+    # This links the bot_database.db file inside the container
+    # to a file named 'data/bot_database.db' on your host machine.
+    volumes:
+      - ./data:/app/data
+    # Tell the bot where to find the database file inside the container
+    environment:
+      - DATABASE_FILE=/app/data/bot_database.db

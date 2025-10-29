@@ -1,0 +1,86 @@
+# =================================================================
+# General Python & Virtual Environments
+# =================================================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+env/
+venv/
+.venv/
+
+# Distribution / Installation
+pip-log.txt
+pip-delete-this-directory.txt
+
+# =================================================================
+# Testing, Logging, and Tooling
+# =================================================================
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.pytest_cache/
+htmlcov/
+.hypothesis/
+
+# Logging
+*.log
+logs/
+
+# Type Checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# =================================================================
+# --- Project Specific & Critical Ignores ---
+# =================================================================
+
+# Ignore the file containing secrets and environment variables.
+# CRITICAL for security.
+.env
+
+# Ignore SQLite database files and their journals/write-ahead logs.
+# CRITICAL for security, privacy, and repository health.
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# You can also be specific with your database name as a fallback
+bot_database.db
+bot_database.db-*
+
+# =================================================================
+# Editor & IDE Specific Folders
+# =================================================================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+nbproject/

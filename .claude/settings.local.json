@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m flake8:*)",
+      "Bash(python -m mypy:*)",
+      "Bash(python -m pip:*)",
+      "Bash(where:*)",
+      "Bash(findstr:*)",
+      "Bash(pip show:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

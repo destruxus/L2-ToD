@@ -314,7 +314,7 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, timestam
     event_unix_timestamp = int(event_start_time.timestamp())
     duration_text = f"{duration_hours:.0f} hours" if duration_hours >= 1 else f"{duration_minutes} minutes"
     
-    payload = { "title": f"{config.get('emoji', '🗓️')} {config['name']} Window", "leaderId": str(interaction.user.id), "leaderName": interaction.user.display_name, "date": event_unix_timestamp, "time": event_unix_timestamp, "description": f"Timer set by {interaction.user.mention}.\nWindow is open for **{duration_text}**.", "templateId": "standard", "advancedSettings": { "duration": duration_minutes, "image": config.get("imageUrl", "none"), "voice_channel": str(config.get('voice_channel_id')) if config.get('voice_channel_id') else "none" } }
+    payload = {"title": f"{config.get('emoji', '🗓️')} {config['name']} Window", "leaderId": str(interaction.user.id), "leaderName": interaction.user.display_name, "date": event_unix_timestamp, "time": event_unix_timestamp, "description": f"Timer set by {interaction.user.mention}.\nWindow is open for **{duration_text}**.", "templateId": "standard", "advancedSettings": {"duration": duration_minutes, "image": config.get("imageUrl", "none"), "voice_channel": str(config.get('voice_channel_id')) if config.get('voice_channel_id') else "none"}}
 
     create_url = f"https://raid-helper.dev/api/v2/servers/{interaction.guild_id}/channels/{config['events_channel_id']}/event"
     try:
@@ -510,14 +510,14 @@ async def boss_list(interaction: discord.Interaction):
     if not await _is_configured(interaction): return
     await interaction.response.defer(ephemeral=True)
     embed = discord.Embed(title="Boss Configuration List", color=discord.Color.blue())
-    default_bosses = "\n".join([f"**{k}**: {v['name']}" for k,v in BOSS_CONFIG.items()])
+    default_bosses = "\n".join([f"**{k}**: {v['name']}" for k, v in BOSS_CONFIG.items()])
     embed.add_field(name="Default Bosses", value=default_bosses or "None", inline=False)
     conn = db_connect()
     cursor = conn.cursor()
     cursor.execute("SELECT boss_key, name FROM custom_bosses WHERE server_id = ?", (interaction.guild_id,))
     custom_bosses_data = cursor.fetchall()
     conn.close()
-    custom_bosses = "\n".join([f"**{k}**: {n}" for k,n in custom_bosses_data])
+    custom_bosses = "\n".join([f"**{k}**: {n}" for k, n in custom_bosses_data])
     embed.add_field(name="Custom Bosses for this Server", value=custom_bosses or "None", inline=False)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -566,8 +566,8 @@ async def overview(interaction: discord.Interaction):
         event_url = f"https://raid-helper.dev/event/{interaction.guild_id}/{event_id}"
         
         value = f"› [View Event]({event_url})"
-        if status == "paused": state, value = f"🔴 Paused", f"*Window exceeded 16h.*\n{value}"
-        elif now > end_time: state, value = f"⚪ Window Closed", f"*Awaiting automated update.*\n{value}"
+        if status == "paused": state, value = "🔴 Paused", f"*Window exceeded 16h.*\n{value}"
+        elif now > end_time: state, value = "⚪ Window Closed", f"*Awaiting automated update.*\n{value}"
         elif now > start_time:
             state = "🟠 Open (LOST)" if duration_hours > config['duration_hours'] else "🟢 Open (ACTIVE)"
             value = f"› Closes <t:{int(end_time.timestamp())}:R>\n{value}"
@@ -639,7 +639,7 @@ async def configure(interaction: discord.Interaction):
                 await dm_channel.send(f"✅ Found it! I will use `#{target_channel.name}`.")
             else:
                 answers[key] = reply_content
-                await dm_channel.send(f"✅ API Key has been recorded.")
+                await dm_channel.send("✅ API Key has been recorded.")
         except asyncio.TimeoutError: return await dm_channel.send("Configuration timed out.")
     
     try:
@@ -718,7 +718,7 @@ async def check_all_boss_windows():
                     "time": new_event_unix_timestamp,
                     "description": "Previous window missed. Calculating max respawn.", 
                     "templateId": "standard", 
-                    "advancedSettings": { "duration": int(new_duration_hours * 60), "image": config.get("imageUrl", "none"), "voice_channel": str(config.get('voice_channel_id')) if config.get('voice_channel_id') else "none" } 
+                    "advancedSettings": {"duration": int(new_duration_hours * 60), "image": config.get("imageUrl", "none"), "voice_channel": str(config.get('voice_channel_id')) if config.get('voice_channel_id') else "none"} 
                 }
                 h = {"Authorization": rh_api_key, "Content-Type": "application/json"}
                 url = f"https://raid-helper.dev/api/v2/servers/{server_config['server_id']}/channels/{config['events_channel_id']}/event"

@@ -262,8 +262,6 @@ async def _find_channel_by_name(guild: discord.Guild, name: str, channel_type: d
                 return thread
     return None
 
-from typing import Optional
-
 async def _process_tod(interaction: discord.Interaction, boss_key: str, timestamp: Optional[str] = None) -> None:
     await interaction.response.send_message(f"Processing request for **{boss_key}**...", ephemeral=True)
     if interaction.guild_id is None:
@@ -469,7 +467,7 @@ boss_group = app_commands.Group(name="boss", description="Manage custom bosses f
 
 @aq.command(name="set", description="Set or update the Time of Death for Ant Queen.")
 @app_commands.describe(timestamp="Optional: A specific Discord timestamp for the TOD.")
-async def aq_set(interaction: discord.Interaction, timestamp: str = None):
+async def aq_set(interaction: discord.Interaction, timestamp: Optional[str] = None):
     if not await _is_configured(interaction): return
     await _process_tod(interaction, "AQ", timestamp)
 

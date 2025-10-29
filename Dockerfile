@@ -1,5 +1,5 @@
 # Use an official lightweight Python image as a parent image
-FROM python:3.10.14-slim-bookworm
+FROM python:3.10-slim-bookworm
 
 # Upgrade pip and setuptools to latest versions to reduce vulnerabilities
 RUN pip install --upgrade pip setuptools

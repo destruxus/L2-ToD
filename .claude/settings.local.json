@@ -12,7 +12,16 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(python:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(nul)",
+      "Bash(exit 0)",
+      "Bash(git push:*)",
+      "Bash(git config:*)",
+      "Bash(git remote add:*)",
+      "Bash(git fetch:*)",
+      "Bash(git pull:*)",
+      "Bash(git stash:*)",
+      "Bash(git merge:*)"
     ],
     "deny": [],
     "ask": []

@@ -64,15 +64,15 @@ print("Payload Body (with compensated time):\n" + json.dumps(payload, indent=2))
 print("-----------------------")
 
 try:
-    response = requests.post(url, json=payload, headers=headers)
-    
-    print(f"\n--- Response Received ---")
+    response = requests.post(url, json=payload, headers=headers, timeout=10)
+
+    print("\n--- Response Received ---")
     print(f"Status Code: {response.status_code}")
     print("Response Body:")
     try:
         response_json = response.json()
         print(json.dumps(response_json, indent=2))
-        
+
         received_time = response_json.get('event', {}).get('startTime')
 
         if received_time:
@@ -90,5 +90,5 @@ try:
         print(response.text)
 
 except requests.exceptions.RequestException as e:
-    print(f"\n--- An error occurred during the request ---")
+    print("\n--- An error occurred during the request ---")
     print(e)

@@ -16,3 +16,4 @@ services:
     # Tell the bot where to find the database file inside the container
     environment:
       - DATABASE_FILE=/app/data/bot_database.db
+      - PYTHONUNBUFFERED=1

@@ -83,6 +83,7 @@ def setup_database():
         "ALTER TABLE servers ADD COLUMN overview_message_id INTEGER;",
         "ALTER TABLE servers ADD COLUMN lost_window_enabled BOOLEAN NOT NULL DEFAULT 1;",
         "ALTER TABLE timer_states ADD COLUMN tod_time TEXT;",
+        "ALTER TABLE servers ADD COLUMN timer_role_id INTEGER;",
     ]:
         try:
             cursor.execute(migration)
@@ -177,6 +178,8 @@ class TodNowButton(ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
+        if not await _can_manage_timers(interaction):
+            return
         if not interaction.guild_id:
             await interaction.followup.send("❌ No server context.", ephemeral=True)
             return
@@ -400,6 +403,27 @@ class AddBossModal(ui.Modal, title='Add a New Custom Boss'):  # type: ignore[cal
             await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
 
 # --- Helper Functions ---
+async def _can_manage_timers(interaction: discord.Interaction) -> bool:
+    conn = db_connect()
+    row = conn.cursor().execute("SELECT timer_role_id FROM servers WHERE server_id = ?", (interaction.guild_id,)).fetchone()
+    conn.close()
+    role_id = row[0] if row else None
+    if not role_id:
+        return True
+    member = interaction.user
+    if isinstance(member, discord.Member):
+        if member.guild_permissions.administrator:
+            return True
+        if any(r.id == role_id for r in member.roles):
+            return True
+    msg = f"❌ You need the <@&{role_id}> role to manage boss timers."
+    if not interaction.response.is_done():
+        await interaction.response.send_message(msg, ephemeral=True)
+    else:
+        await interaction.followup.send(msg, ephemeral=True)
+    return False
+
+
 async def _is_configured(interaction: discord.Interaction) -> bool:
     conn = db_connect()
     is_conf = conn.cursor().execute("SELECT 1 FROM servers WHERE server_id = ?", (interaction.guild_id,)).fetchone()
@@ -713,6 +737,7 @@ boss_group = app_commands.Group(name="boss", description="Manage custom bosses")
 ])
 async def tod_set(interaction: discord.Interaction, boss: str, when: app_commands.Choice[str], timestamp: Optional[str] = None):
     if not await _is_configured(interaction): return
+    if not await _can_manage_timers(interaction): return
 
     tod_time: Optional[datetime] = None
     if when.value == "minus10":
@@ -752,6 +777,7 @@ async def tod_set(interaction: discord.Interaction, boss: str, when: app_command
 @app_commands.describe(boss="The boss whose timer should be cleared.")
 async def tod_reset(interaction: discord.Interaction, boss: str):
     if not await _is_configured(interaction): return
+    if not await _can_manage_timers(interaction): return
     await _process_reset(interaction, boss)
 
 # ── /tod correction ───────────────────────────────────────────────────────────
@@ -760,6 +786,7 @@ async def tod_reset(interaction: discord.Interaction, boss: str):
 @app_commands.describe(boss="The boss to adjust.", adjustment="Minutes to add or subtract (e.g. +10 or -15).")
 async def tod_correction(interaction: discord.Interaction, boss: str, adjustment: str):
     if not await _is_configured(interaction): return
+    if not await _can_manage_timers(interaction): return
     await _process_correction(interaction, boss, adjustment)
 
 # ── Boss management ────────────────────────────────────────────────────────────
@@ -823,6 +850,22 @@ async def set_lost_window(interaction: discord.Interaction, enabled: app_command
     conn.commit()
     conn.close()
     await interaction.followup.send(f"✅ Automated 'lost window' tracking has been **{enabled.name}d**.", ephemeral=True)
+
+@options_group.command(name="timer_role", description="Restrict timer changes to a role. Run without a role to allow everyone.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(role="Members need this role to set/reset/correct timers. Omit to remove the restriction.")
+async def set_timer_role(interaction: discord.Interaction, role: Optional[discord.Role] = None):
+    if not await _is_configured(interaction): return
+    await interaction.response.defer(ephemeral=True)
+    conn = db_connect()
+    conn.cursor().execute("UPDATE servers SET timer_role_id = ? WHERE server_id = ?", (role.id if role else None, interaction.guild_id))
+    conn.commit()
+    conn.close()
+    if role:
+        await interaction.followup.send(f"✅ Timer commands are now restricted to **{role.name}** (admins always allowed).", ephemeral=True)
+    else:
+        await interaction.followup.send("✅ Timer commands can now be used by everyone.", ephemeral=True)
+
 
 @bot.tree.command(name="overview", description="Show a snapshot of all current boss timers.")
 async def overview(interaction: discord.Interaction):

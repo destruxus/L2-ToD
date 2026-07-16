@@ -1093,8 +1093,19 @@ async def on_ready():
     bot.tree.add_command(options_group)
 
     try:
-        await bot.tree.sync()
-        print("Slash commands synced.")
+        # Dynamic per-guild sync: instant command updates on every connected server.
+        # Falls back to global sync if the bot is in many guilds (rate-limit safety).
+        if len(bot.guilds) <= 25:
+            for guild in bot.guilds:
+                try:
+                    bot.tree.copy_global_to(guild=guild)
+                    await bot.tree.sync(guild=guild)
+                except discord.HTTPException as e:
+                    print(f"WARN: Could not sync commands to guild {guild.id}: {e}")
+            print(f"Slash commands synced to {len(bot.guilds)} guild(s).")
+        else:
+            await bot.tree.sync()
+            print("Slash commands synced globally.")
     except discord.HTTPException as e:
         print(f"ERROR: Failed to sync slash commands: {e}")
 
@@ -1110,6 +1121,17 @@ async def on_ready():
 @check_all_boss_windows.before_loop
 async def before_check():
     await bot.wait_until_ready()
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    """Register slash commands immediately when the bot joins a new server."""
+    try:
+        bot.tree.copy_global_to(guild=guild)
+        await bot.tree.sync(guild=guild)
+        print(f"Synced commands to new guild: {guild.name} ({guild.id})")
+    except discord.HTTPException as e:
+        print(f"ERROR: Failed to sync commands to new guild {guild.id}: {e}")
+
 
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:

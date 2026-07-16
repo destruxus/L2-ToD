@@ -1050,9 +1050,7 @@ async def on_ready():
     bot.tree.add_command(options_group)
 
     try:
-        MY_GUILD = discord.Object(id=1043210286854840450)
-        bot.tree.copy_global_to(guild=MY_GUILD)
-        await bot.tree.sync(guild=MY_GUILD)
+        await bot.tree.sync()
         print("Slash commands synced.")
     except discord.HTTPException as e:
         print(f"ERROR: Failed to sync slash commands: {e}")

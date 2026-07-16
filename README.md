@@ -10,6 +10,7 @@ A multi-server Discord bot for tracking Lineage 2 raid boss respawn timers. Set 
 - **Safety pause**: automation pauses when a window would exceed 16 hours, and posts an alert.
 - **Custom bosses**: admins can add per-server bosses next to the built-in defaults.
 - **Timestamp helper**: convert any time expression into Discord timestamp formats.
+- **Automatic stale-server cleanup**: if the Bot is removed from a server or permanently loses access to its configured channel, that server's data is deleted automatically after a 7-day grace period.
 
 ## Default bosses
 

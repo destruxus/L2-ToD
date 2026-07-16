@@ -84,6 +84,7 @@ def setup_database():
         "ALTER TABLE servers ADD COLUMN lost_window_enabled BOOLEAN NOT NULL DEFAULT 1;",
         "ALTER TABLE timer_states ADD COLUMN tod_time TEXT;",
         "ALTER TABLE servers ADD COLUMN timer_role_id INTEGER;",
+        "ALTER TABLE servers ADD COLUMN unreachable_since TEXT;",
     ]:
         try:
             cursor.execute(migration)
@@ -1117,10 +1118,55 @@ async def on_ready():
         await post_or_update_overview(server_id)
 
     check_all_boss_windows.start()
+    cleanup_stale_servers.start()
 
 @check_all_boss_windows.before_loop
 async def before_check():
     await bot.wait_until_ready()
+
+@tasks.loop(hours=6)
+async def cleanup_stale_servers():
+    """Remove data for servers the bot can no longer reach (kicked, or the
+    configured channel was deleted / access lost) after a 7-day grace period.
+    A healthy but quiet server is never touched."""
+    now = datetime.now(timezone.utc)
+    conn = db_connect()
+    cursor = conn.cursor()
+    rows = cursor.execute("SELECT server_id, timer_channel_id, unreachable_since FROM servers").fetchall()
+    for server_id, channel_id, since in rows:
+        reachable = False
+        guild = bot.get_guild(server_id)
+        if guild is not None:
+            channel = guild.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await bot.fetch_channel(channel_id)
+                except (discord.NotFound, discord.Forbidden):
+                    channel = None
+                except discord.HTTPException:
+                    continue
+            reachable = channel is not None
+        if reachable:
+            if since:
+                cursor.execute("UPDATE servers SET unreachable_since = NULL WHERE server_id = ?", (server_id,))
+                print(f"STALE-CHECK: server {server_id} reachable again; grace period cleared.")
+        else:
+            if not since:
+                cursor.execute("UPDATE servers SET unreachable_since = ? WHERE server_id = ?", (now.isoformat(), server_id))
+                print(f"STALE-CHECK: server {server_id} unreachable; 7-day grace period started.")
+            elif now - datetime.fromisoformat(since) > timedelta(days=7):
+                cursor.execute("DELETE FROM timer_states WHERE server_id = ?", (server_id,))
+                cursor.execute("DELETE FROM custom_bosses WHERE server_id = ?", (server_id,))
+                cursor.execute("DELETE FROM servers WHERE server_id = ?", (server_id,))
+                print(f"STALE-CHECK: server {server_id} unreachable for 7+ days; all data removed.")
+    conn.commit()
+    conn.close()
+
+
+@cleanup_stale_servers.before_loop
+async def before_cleanup():
+    await bot.wait_until_ready()
+
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):

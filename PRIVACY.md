@@ -27,7 +27,7 @@ Stored data is used solely to operate the Bot's timer features. It is never sold
 
 ## 4. Data Retention & Deletion
 
-Data is retained while the Bot is a member of your server. A server administrator can permanently delete all data associated with their server at any time by running the `/wipe_my_data` command. Deletion is immediate and irreversible.
+Data is retained while the Bot is a member of your server. A server administrator can permanently delete all data associated with their server at any time by running the `/wipe_my_data` command. Deletion is immediate and irreversible. In addition, if the Bot is removed from a server or permanently loses access to its configured channels, that server's data is deleted automatically after a 7-day grace period.
 
 ## 5. Data Storage & Security
 

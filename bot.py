@@ -928,8 +928,10 @@ async def boss_remove(interaction: discord.Interaction, boss_key: str):
     conn = db_connect()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM custom_bosses WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, boss_key.upper()))
-    conn.commit()
     removed = cursor.rowcount > 0
+    cursor.execute("DELETE FROM timer_states WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, boss_key.upper()))
+    cursor.execute("DELETE FROM announcements WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, boss_key.upper()))
+    conn.commit()
     conn.close()
     if removed:
         await interaction.followup.send(f"✅ Custom boss `{boss_key.upper()}` has been removed.", ephemeral=True)

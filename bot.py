@@ -78,6 +78,18 @@ def setup_database():
     """)
 
     # Migrations: add new columns to existing databases without errors
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS announcements (
+            server_id INTEGER NOT NULL,
+            boss_key TEXT NOT NULL,
+            channel_id INTEGER NOT NULL,
+            role_ids TEXT,
+            lead_minutes INTEGER NOT NULL,
+            announced_for TEXT,
+            PRIMARY KEY (server_id, boss_key),
+            FOREIGN KEY(server_id) REFERENCES servers(server_id) ON DELETE CASCADE
+        );
+    """)
     for migration in [
         "ALTER TABLE servers ADD COLUMN timer_channel_id INTEGER NOT NULL DEFAULT 0;",
         "ALTER TABLE servers ADD COLUMN overview_message_id INTEGER;",
@@ -140,6 +152,115 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # --- UI Views ---
+LEAD_TIME_CHOICES = [5, 10, 15, 30, 45, 60, 90, 120]
+
+
+class AnnounceSetupView(ui.View):
+    # DM view: four dropdowns (boss, channel, roles, lead time) + Save.
+    def __init__(self, guild: discord.Guild, author: discord.User, boss_options: list):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.author = author
+        self.boss_key = None
+        self.channel_id = None
+        self.role_ids = []
+        self.lead_minutes = None
+
+        boss_select = ui.Select(placeholder="1. Which boss?",
+            options=[discord.SelectOption(label=name, value=key) for key, name in boss_options[:25]])
+        boss_select.callback = self._make_cb(boss_select, "boss_key")
+        self.add_item(boss_select)
+
+        channels = [c for c in guild.text_channels if c.permissions_for(guild.me).send_messages][:25]
+        chan_select = ui.Select(placeholder="2. Post in which channel?",
+            options=[discord.SelectOption(label=f"#{c.name}"[:100], value=str(c.id)) for c in channels])
+        chan_select.callback = self._make_cb(chan_select, "channel_id", cast=int)
+        self.add_item(chan_select)
+
+        roles = [r for r in guild.roles if not r.managed and r.name != "@everyone"][:25]
+        role_select = ui.Select(placeholder="3. Mention which roles? (optional, multi)",
+            min_values=0, max_values=len(roles) if roles else 1,
+            options=[discord.SelectOption(label=r.name[:100], value=str(r.id)) for r in roles]
+                    or [discord.SelectOption(label="No roles available", value="0")])
+        role_select.callback = self._make_roles_cb(role_select)
+        self.add_item(role_select)
+
+        time_select = ui.Select(placeholder="4. How long before the window opens?",
+            options=[discord.SelectOption(label=f"{m} minutes before", value=str(m)) for m in LEAD_TIME_CHOICES])
+        time_select.callback = self._make_cb(time_select, "lead_minutes", cast=int)
+        self.add_item(time_select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author.id
+
+    def _make_cb(self, select: ui.Select, attr: str, cast=str):
+        async def cb(interaction: discord.Interaction):
+            setattr(self, attr, cast(select.values[0]))
+            await interaction.response.defer()
+        return cb
+
+    def _make_roles_cb(self, select: ui.Select):
+        async def cb(interaction: discord.Interaction):
+            self.role_ids = [int(v) for v in select.values if v != "0"]
+            await interaction.response.defer()
+        return cb
+
+    @ui.button(label="Save announcement", style=discord.ButtonStyle.success, row=4)
+    async def save(self, interaction: discord.Interaction, button: ui.Button):
+        if not all([self.boss_key, self.channel_id, self.lead_minutes]):
+            return await interaction.response.send_message(
+                "⚠️ Please pick at least a boss, a channel, and a lead time first.")
+        conn = db_connect()
+        conn.cursor().execute("""
+            INSERT INTO announcements (server_id, boss_key, channel_id, role_ids, lead_minutes, announced_for)
+            VALUES (?, ?, ?, ?, ?, NULL)
+            ON CONFLICT(server_id, boss_key) DO UPDATE SET
+                channel_id=excluded.channel_id, role_ids=excluded.role_ids,
+                lead_minutes=excluded.lead_minutes, announced_for=NULL;
+        """, (self.guild.id, self.boss_key, self.channel_id,
+              ",".join(map(str, self.role_ids)) or None, self.lead_minutes))
+        conn.commit()
+        conn.close()
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(
+            f"✅ Announcement saved: **{self.boss_key}** in <#{self.channel_id}>, "
+            f"{self.lead_minutes} min before the window opens.")
+        self.stop()
+
+
+class AnnounceRemoveView(ui.View):
+    # DM view: pick an existing announcement to remove.
+    def __init__(self, guild: discord.Guild, author: discord.User, existing: list):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.author = author
+        select = ui.Select(placeholder="Which announcement do you want to remove?",
+            options=[discord.SelectOption(label=f"{boss_key} - {lead} min before", value=boss_key)
+                     for boss_key, lead in existing[:25]])
+        select.callback = self._remove_cb(select)
+        self.add_item(select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author.id
+
+    def _remove_cb(self, select: ui.Select):
+        async def cb(interaction: discord.Interaction):
+            boss_key = select.values[0]
+            conn = db_connect()
+            conn.cursor().execute("DELETE FROM announcements WHERE server_id = ? AND boss_key = ?",
+                                  (self.guild.id, boss_key))
+            conn.commit()
+            conn.close()
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(view=self)
+            await interaction.followup.send(f"🗑️ Announcement for **{boss_key}** removed.")
+            self.stop()
+        return cb
+
+
 class ConfirmationView(ui.View):
     def __init__(self, author: discord.abc.User):
         super().__init__(timeout=60)
@@ -868,6 +989,44 @@ async def set_timer_role(interaction: discord.Interaction, role: Optional[discor
         await interaction.followup.send("✅ Timer commands can now be used by everyone.", ephemeral=True)
 
 
+@options_group.command(name="announce", description="Set up or remove a boss window announcement via DM.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(action="Set up a new/updated announcement, or remove an existing one.")
+@app_commands.choices(action=[
+    app_commands.Choice(name="Set up announcement", value="setup"),
+    app_commands.Choice(name="Remove announcement", value="remove"),
+])
+async def options_announce(interaction: discord.Interaction, action: app_commands.Choice[str]):
+    if not await _is_configured(interaction): return
+    await interaction.response.send_message("📬 I've sent you a DM to continue.", ephemeral=True)
+    try:
+        dm = await interaction.user.create_dm()
+        if action.value == "setup":
+            boss_options = [(key, cfg["name"]) for key, cfg in BOSS_CONFIG.items()]
+            conn = db_connect()
+            cur = conn.cursor()
+            cur.execute("SELECT boss_key, name FROM custom_bosses WHERE server_id = ?", (interaction.guild_id,))
+            boss_options += [(k, f"{n} (custom)") for k, n in cur.fetchall()]
+            conn.close()
+            view = AnnounceSetupView(interaction.guild, interaction.user, boss_options)
+            await dm.send(
+                f"📢 Let's set up a window announcement for **{interaction.guild.name}**.\n"
+                "Pick a boss, a channel, optional roles to mention, and how long before "
+                "the window opens the announcement should post - then press **Save**.", view=view)
+        else:
+            conn = db_connect()
+            cur = conn.cursor()
+            cur.execute("SELECT boss_key, lead_minutes FROM announcements WHERE server_id = ?", (interaction.guild_id,))
+            existing = cur.fetchall()
+            conn.close()
+            if not existing:
+                return await dm.send("There are no announcements configured for this server.")
+            view = AnnounceRemoveView(interaction.guild, interaction.user, existing)
+            await dm.send(f"Select the announcement to remove for **{interaction.guild.name}**:", view=view)
+    except discord.Forbidden:
+        await interaction.followup.send("❌ I couldn't DM you. Please check your privacy settings.", ephemeral=True)
+
+
 @bot.tree.command(name="overview", description="Show a snapshot of all current boss timers.")
 async def overview(interaction: discord.Interaction):
     if not await _is_configured(interaction): return
@@ -1022,6 +1181,49 @@ async def wipe_my_data(interaction: discord.Interaction):
 
 # --- Automated Background Task ---
 @tasks.loop(minutes=1)
+async def announcement_loop():
+    # Post announcements for windows opening within the configured lead time.
+    # announced_for stores the window start already announced: one ping per window.
+    now = datetime.now(timezone.utc)
+    conn = db_connect()
+    cur = conn.cursor()
+    rows = cur.execute("""
+        SELECT a.server_id, a.boss_key, a.channel_id, a.role_ids, a.lead_minutes,
+               a.announced_for, t.start_time
+        FROM announcements a
+        JOIN timer_states t ON t.server_id = a.server_id AND t.boss_key = a.boss_key
+        WHERE t.status = 'active'
+    """).fetchall()
+    for server_id, boss_key, channel_id, role_ids, lead, announced_for, start_iso in rows:
+        start = datetime.fromisoformat(start_iso)
+        if announced_for == start_iso:
+            continue
+        if not (start - timedelta(minutes=lead) <= now < start):
+            continue
+        config = await _get_boss_config(server_id, boss_key)
+        if not config:
+            continue
+        mentions = " ".join(f"<@&{rid}>" for rid in (role_ids or "").split(",") if rid)
+        try:
+            channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+            await channel.send(
+                (f"⏰ {config.get('emoji', '')} **{config['name']}** window opens "
+                 f"<t:{int(start.timestamp())}:R>! " + mentions).strip(),
+                allowed_mentions=discord.AllowedMentions(roles=True))
+            cur.execute("UPDATE announcements SET announced_for = ? WHERE server_id = ? AND boss_key = ?",
+                        (start_iso, server_id, boss_key))
+        except (discord.NotFound, discord.Forbidden):
+            pass
+    conn.commit()
+    conn.close()
+
+
+@announcement_loop.before_loop
+async def before_announcement_loop():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(minutes=1)
 async def check_all_boss_windows():
     conn = db_connect()
     conn.row_factory = sqlite3.Row
@@ -1119,6 +1321,7 @@ async def on_ready():
 
     check_all_boss_windows.start()
     cleanup_stale_servers.start()
+    announcement_loop.start()
 
 @check_all_boss_windows.before_loop
 async def before_check():
@@ -1177,6 +1380,24 @@ async def on_guild_join(guild: discord.Guild):
         print(f"Synced commands to new guild: {guild.name} ({guild.id})")
     except discord.HTTPException as e:
         print(f"ERROR: Failed to sync commands to new guild {guild.id}: {e}")
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        msg = "❌ You need the **Administrator** permission to use this command."
+    elif isinstance(error, app_commands.CheckFailure):
+        msg = "❌ You don't have permission to use this command."
+    else:
+        print(f"Unhandled command error: {error}")
+        msg = "⚠️ Something went wrong while running this command."
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except discord.HTTPException:
+        pass
 
 
 if __name__ == "__main__":

@@ -600,7 +600,7 @@ async def _find_channel_by_name(guild: discord.Guild, name: str, channel_type: d
     return None
 
 # --- Overview Embed Builder & Poster ---
-async def build_overview_embed(guild_id: Optional[int]) -> discord.Embed:
+async def build_overview_embed(guild_id: Optional[int], only_bosses: Optional[list] = None, title: str = "Boss Timer Overview") -> discord.Embed:
     if guild_id is None:
         return discord.Embed(title="Boss Timer Overview", description="No server context.", color=discord.Color.dark_gold())
 
@@ -612,7 +612,7 @@ async def build_overview_embed(guild_id: Optional[int]) -> discord.Embed:
     ).fetchall()
     conn.close()
 
-    embed = discord.Embed(title="Boss Timer Overview", color=discord.Color.dark_gold(), timestamp=datetime.now(timezone.utc))
+    embed = discord.Embed(title=title, color=discord.Color.dark_gold(), timestamp=datetime.now(timezone.utc))
     embed.set_footer(text="Last updated")
 
     if not timers:
@@ -620,6 +620,8 @@ async def build_overview_embed(guild_id: Optional[int]) -> discord.Embed:
         return embed
 
     for boss_key, status, tod_str, start_str, end_str, duration_hours in sorted(timers, key=lambda x: x[3] or ""):
+        if only_bosses is not None and boss_key not in only_bosses:
+            continue
         config = await _get_boss_config(guild_id, boss_key)
         if not config:
             continue
@@ -677,38 +679,8 @@ PUBLIC_OVERVIEW_BOSSES = ["ORFEN", "AQ", "CORE"]
 
 
 async def build_public_overview_embed(guild_id: int) -> discord.Embed:
-    conn = db_connect()
-    timers = {row[0]: row for row in conn.cursor().execute(
-        "SELECT boss_key, status, start_time, end_time, duration_hours FROM timer_states WHERE server_id = ?",
-        (guild_id,)).fetchall()}
-    conn.close()
-    embed = discord.Embed(title="🐉 Boss Windows", color=discord.Color.dark_teal(),
-                          timestamp=datetime.now(timezone.utc))
-    embed.set_footer(text="Last updated")
-    now = datetime.now(timezone.utc)
-    for boss_key in PUBLIC_OVERVIEW_BOSSES:
-        config = await _get_boss_config(guild_id, boss_key)
-        if not config:
-            continue
-        emoji = config.get("emoji", "🗓️")
-        name = config["name"]
-        row = timers.get(boss_key)
-        if not row:
-            embed.add_field(name=f"{emoji} {name}", value="⚪ No timer set", inline=False)
-            continue
-        _, status, start_str, end_str, duration_hours = row
-        start_time = datetime.fromisoformat(start_str)
-        end_time = datetime.fromisoformat(end_str)
-        if status == "paused":
-            value = "🔴 Paused"
-        elif now > end_time:
-            value = "⚪ Window closed"
-        elif now > start_time:
-            value = f"🟢 **Open now** — closes <t:{int(end_time.timestamp())}:R>"
-        else:
-            value = f"🔵 Opens <t:{int(start_time.timestamp())}:R>"
-        embed.add_field(name=f"{emoji} {name}", value=value, inline=False)
-    return embed
+    # Reuses the exact officer-overview formatting, filtered to the public bosses.
+    return await build_overview_embed(guild_id, only_bosses=PUBLIC_OVERVIEW_BOSSES, title="Boss Timer Overview")
 
 
 async def post_or_update_public_overview(guild_id: Optional[int]) -> None:

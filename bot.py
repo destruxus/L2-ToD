@@ -48,6 +48,8 @@ def setup_database():
             alerts_channel_id   INTEGER NOT NULL,
             timer_channel_id    INTEGER NOT NULL,
             overview_message_id INTEGER,
+        public_channel_id INTEGER,
+        public_message_id INTEGER,
             lost_window_enabled BOOLEAN NOT NULL DEFAULT 1
         );
     """)
@@ -93,6 +95,8 @@ def setup_database():
     for migration in [
         "ALTER TABLE servers ADD COLUMN timer_channel_id INTEGER NOT NULL DEFAULT 0;",
         "ALTER TABLE servers ADD COLUMN overview_message_id INTEGER;",
+        "ALTER TABLE servers ADD COLUMN public_channel_id INTEGER;",
+        "ALTER TABLE servers ADD COLUMN public_message_id INTEGER;",
         "ALTER TABLE servers ADD COLUMN lost_window_enabled BOOLEAN NOT NULL DEFAULT 1;",
         "ALTER TABLE timer_states ADD COLUMN tod_time TEXT;",
         "ALTER TABLE servers ADD COLUMN timer_role_id INTEGER;",
@@ -669,6 +673,76 @@ async def build_overview_embed(guild_id: Optional[int]) -> discord.Embed:
 
     return embed
 
+PUBLIC_OVERVIEW_BOSSES = ["ORFEN", "AQ", "CORE"]
+
+
+async def build_public_overview_embed(guild_id: int) -> discord.Embed:
+    conn = db_connect()
+    timers = {row[0]: row for row in conn.cursor().execute(
+        "SELECT boss_key, status, start_time, end_time, duration_hours FROM timer_states WHERE server_id = ?",
+        (guild_id,)).fetchall()}
+    conn.close()
+    embed = discord.Embed(title="🐉 Boss Windows", color=discord.Color.dark_teal(),
+                          timestamp=datetime.now(timezone.utc))
+    embed.set_footer(text="Last updated")
+    now = datetime.now(timezone.utc)
+    for boss_key in PUBLIC_OVERVIEW_BOSSES:
+        config = await _get_boss_config(guild_id, boss_key)
+        if not config:
+            continue
+        emoji = config.get("emoji", "🗓️")
+        name = config["name"]
+        row = timers.get(boss_key)
+        if not row:
+            embed.add_field(name=f"{emoji} {name}", value="⚪ No timer set", inline=False)
+            continue
+        _, status, start_str, end_str, duration_hours = row
+        start_time = datetime.fromisoformat(start_str)
+        end_time = datetime.fromisoformat(end_str)
+        if status == "paused":
+            value = "🔴 Paused"
+        elif now > end_time:
+            value = "⚪ Window closed"
+        elif now > start_time:
+            value = f"🟢 **Open now** — closes <t:{int(end_time.timestamp())}:R>"
+        else:
+            value = f"🔵 Opens <t:{int(start_time.timestamp())}:R>"
+        embed.add_field(name=f"{emoji} {name}", value=value, inline=False)
+    return embed
+
+
+async def post_or_update_public_overview(guild_id: Optional[int]) -> None:
+    if guild_id is None:
+        return
+    conn = db_connect()
+    row = conn.cursor().execute(
+        "SELECT public_channel_id, public_message_id FROM servers WHERE server_id = ?", (guild_id,)
+    ).fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return
+    public_channel_id, public_message_id = row
+    embed = await build_public_overview_embed(guild_id)
+    try:
+        channel = await bot.fetch_channel(public_channel_id)
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return
+        if public_message_id:
+            try:
+                message = await channel.fetch_message(public_message_id)
+                await message.edit(embed=embed)
+                return
+            except discord.NotFound:
+                pass
+        message = await channel.send(embed=embed)
+        conn = db_connect()
+        conn.cursor().execute("UPDATE servers SET public_message_id = ? WHERE server_id = ?", (message.id, guild_id))
+        conn.commit()
+        conn.close()
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+        print(f"Could not post/update public overview for server {guild_id}: {e}")
+
+
 async def post_or_update_overview(guild_id: Optional[int]) -> None:
     if guild_id is None:
         return
@@ -716,6 +790,7 @@ async def post_or_update_overview(guild_id: Optional[int]) -> None:
         conn.close()
     except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
         print(f"Could not post/update overview for server {guild_id}: {e}")
+    await post_or_update_public_overview(guild_id)
 
 # --- Main Timer Command Logic ---
 async def _process_tod(interaction: discord.Interaction, boss_key: str, tod_time_utc: Optional[datetime] = None) -> None:
@@ -1037,6 +1112,26 @@ async def options_announce(interaction: discord.Interaction, action: app_command
             await dm.send(f"Select the announcement to remove for **{interaction.guild.name}**:", view=view)
     except discord.Forbidden:
         await interaction.followup.send("❌ I couldn't DM you. Please check your privacy settings.", ephemeral=True)
+
+
+@bot.tree.command(name="setpublicchannel", description="Admin: set (or clear) a channel for a compact public boss overview.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(channel="The channel for the public overview. Leave empty to turn it off.")
+async def setpublicchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+    if not await _is_configured(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    conn = db_connect()
+    if channel is None:
+        conn.cursor().execute("UPDATE servers SET public_channel_id = NULL, public_message_id = NULL WHERE server_id = ?", (interaction.guild_id,))
+        conn.commit()
+        conn.close()
+        return await interaction.followup.send("✅ Public overview turned **off**.", ephemeral=True)
+    conn.cursor().execute("UPDATE servers SET public_channel_id = ?, public_message_id = NULL WHERE server_id = ?", (channel.id, interaction.guild_id))
+    conn.commit()
+    conn.close()
+    await post_or_update_public_overview(interaction.guild_id)
+    await interaction.followup.send(f"✅ Public overview will be posted in {channel.mention} (showing Orfen, Ant Queen, Core).", ephemeral=True)
 
 
 @bot.tree.command(name="overview", description="Show a snapshot of all current boss timers.")

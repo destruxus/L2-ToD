@@ -118,6 +118,16 @@ BOSS_CONFIG = {
         "lost_respawn_shift_hours": 18, "emoji": "🐜",
         "imageUrl": "https://cdn.discordapp.com/attachments/1360048329811165204/1374070282959978638/1fc1abd4-9dae-4b8d-ba4c-9c185ddb2644.i4g.png?ex=6858e06c&is=68578eec&hm=eb596e19bd3c7feded8cd687ea2a41701c8662c1c5d9332a90ad410d0a85155b&"
     },
+    "CORE": {
+        "name": "Core", "respawn_hours": 48, "duration_hours": 4,
+        "lost_respawn_shift_hours": 49, "emoji": "🔮",
+        "imageUrl": None
+    },
+    "ORFEN": {
+        "name": "Orfen", "respawn_hours": 33, "duration_hours": 4,
+        "lost_respawn_shift_hours": 34, "emoji": "🦑",
+        "imageUrl": None
+    },
     "BAIUM": {
         "name": "Baium", "respawn_hours": 125, "duration_hours": 4,
         "lost_respawn_shift_hours": 126, "emoji": "🏔️",

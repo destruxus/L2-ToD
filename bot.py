@@ -751,6 +751,7 @@ async def post_or_update_overview(guild_id: Optional[int]) -> None:
             try:
                 message = await channel.fetch_message(overview_message_id)
                 await message.edit(embed=embed, view=view)
+                await post_or_update_public_overview(guild_id)
                 return
             except discord.NotFound:
                 pass  # Message was deleted; fall through to post a new one

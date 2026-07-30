@@ -149,7 +149,7 @@ BOSS_CONFIG = {
     },
     # Epidos must be killed first — its death triggers Beleth's spawn.
     "ELPY": {
-        "name": "Epidos", "respawn_hours": 21, "duration_hours": 24,
+        "name": "Epidos", "respawn_hours": 21, "duration_hours": 21,
         "lost_respawn_shift_hours": 22, "emoji": "🧪",
         "imageUrl": None
     },

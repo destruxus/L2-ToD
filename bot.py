@@ -680,7 +680,9 @@ PUBLIC_OVERVIEW_BOSSES = ["ORFEN", "AQ", "CORE"]
 
 async def build_public_overview_embed(guild_id: int) -> discord.Embed:
     # Reuses the exact officer-overview formatting, filtered to the public bosses.
-    return await build_overview_embed(guild_id, only_bosses=PUBLIC_OVERVIEW_BOSSES, title="Boss Timer Overview")
+    embed = await build_overview_embed(guild_id, only_bosses=PUBLIC_OVERVIEW_BOSSES, title="Boss Timer Overview")
+    embed.description = "🔘 Press a boss button below to set its Time of Death to **now**."
+    return embed
 
 
 class PublicTodButton(ui.Button):

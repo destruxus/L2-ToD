@@ -683,6 +683,78 @@ async def build_public_overview_embed(guild_id: int) -> discord.Embed:
     return await build_overview_embed(guild_id, only_bosses=PUBLIC_OVERVIEW_BOSSES, title="Boss Timer Overview")
 
 
+class PublicTodButton(ui.Button):
+    """Public 'ToD Now' button: sets ToD to now, NO permission check (open to all).
+    Posts the same Timer Set report to the officer alerts channel."""
+    def __init__(self, boss_key: str, label: str, emoji_str):
+        super().__init__(label=label, emoji=emoji_str, style=discord.ButtonStyle.success,
+                         custom_id=f"public_tod_{boss_key}")
+        self.boss_key = boss_key
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if not interaction.guild_id:
+            await interaction.followup.send("❌ No server context.", ephemeral=True)
+            return
+        config = await _get_boss_config(interaction.guild_id, self.boss_key)
+        if not config:
+            await interaction.followup.send("❌ Boss configuration not found.", ephemeral=True)
+            return
+        tod_time = datetime.now(timezone.utc)
+        duration_hours = config['duration_hours']
+        event_start_time = tod_time + timedelta(hours=config['respawn_hours'])
+        event_end_time = event_start_time + timedelta(hours=duration_hours)
+        conn = db_connect()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO timer_states (server_id, boss_key, tod_time, start_time, end_time, duration_hours, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(server_id, boss_key) DO UPDATE SET
+                tod_time=excluded.tod_time, start_time=excluded.start_time,
+                end_time=excluded.end_time, duration_hours=excluded.duration_hours, status=excluded.status;
+        """, (interaction.guild_id, self.boss_key, tod_time.isoformat(),
+              event_start_time.isoformat(), event_end_time.isoformat(), duration_hours, "active"))
+        conn.commit()
+        conn.close()
+        await post_or_update_overview(interaction.guild_id)
+        duration_text = f"{duration_hours:.0f}h" if duration_hours >= 1 else f"{int(duration_hours * 60)}m"
+        embed = discord.Embed(
+            title=f"{config.get('emoji', '🗓️')} {config['name']} — Timer Set",
+            color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
+        embed.add_field(name="Time of Death", value=f"<t:{int(tod_time.timestamp())}:f>", inline=False)
+        embed.add_field(name="Window Opens", value=f"<t:{int(event_start_time.timestamp())}:f> (<t:{int(event_start_time.timestamp())}:R>)", inline=False)
+        embed.add_field(name="Window Closes", value=f"<t:{int(event_end_time.timestamp())}:f> — duration {duration_text}", inline=False)
+        embed.set_footer(text=f"Set by {interaction.user.display_name}")
+        if config.get("imageUrl"):
+            embed.set_thumbnail(url=config["imageUrl"])
+        conn2 = db_connect()
+        row = conn2.cursor().execute("SELECT alerts_channel_id FROM servers WHERE server_id = ?", (interaction.guild_id,)).fetchone()
+        conn2.close()
+        report_sent = False
+        if row:
+            try:
+                report_channel = await bot.fetch_channel(row[0])
+                await report_channel.send(embed=embed)
+                report_sent = True
+            except (discord.Forbidden, discord.HTTPException) as e:
+                print(f"PublicTodButton: could not post to report channel: {e}")
+        ack = f"✅ **{config['name']}** — ToD set to <t:{int(tod_time.timestamp())}:t>."
+        if not report_sent:
+            ack += " (Report could not be posted to the report channel.)"
+        await interaction.followup.send(ack, ephemeral=True)
+
+
+class PublicBossTimerView(ui.View):
+    """Persistent view with one open ToD button per public boss (no copy buttons)."""
+    def __init__(self):
+        super().__init__(timeout=None)
+        for boss_key in PUBLIC_OVERVIEW_BOSSES:
+            cfg = BOSS_CONFIG.get(boss_key, {})
+            self.add_item(PublicTodButton(boss_key=boss_key, label=cfg.get('name', boss_key), emoji_str=cfg.get('emoji')))
+
+
+
+
 async def post_or_update_public_overview(guild_id: Optional[int]) -> None:
     if guild_id is None:
         return
@@ -702,11 +774,11 @@ async def post_or_update_public_overview(guild_id: Optional[int]) -> None:
         if public_message_id:
             try:
                 message = await channel.fetch_message(public_message_id)
-                await message.edit(embed=embed)
+                await message.edit(embed=embed, view=PublicBossTimerView())
                 return
             except discord.NotFound:
                 pass
-        message = await channel.send(embed=embed)
+        message = await channel.send(embed=embed, view=PublicBossTimerView())
         conn = db_connect()
         conn.cursor().execute("UPDATE servers SET public_message_id = ? WHERE server_id = ?", (message.id, guild_id))
         conn.commit()
@@ -1370,6 +1442,7 @@ async def on_ready():
     conn.close()
     persistent_entries += [(key, name, None) for key, name in all_custom]
     bot.add_view(BossTimerView(persistent_entries))
+    bot.add_view(PublicBossTimerView())
 
     bot.tree.add_command(tod_group)
     bot.tree.add_command(boss_group)

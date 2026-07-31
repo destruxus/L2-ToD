@@ -702,6 +702,23 @@ class PublicTodButton(ui.Button):
         if not config:
             await interaction.followup.send("❌ Boss configuration not found.", ephemeral=True)
             return
+        # 5-minute cooldown: block if this boss's ToD was already set recently (by anyone).
+        conn_cd = db_connect()
+        cd_row = conn_cd.cursor().execute(
+            "SELECT tod_time FROM timer_states WHERE server_id = ? AND boss_key = ?",
+            (interaction.guild_id, self.boss_key)).fetchone()
+        conn_cd.close()
+        if cd_row and cd_row[0]:
+            try:
+                last_tod = datetime.fromisoformat(cd_row[0])
+                elapsed = (datetime.now(timezone.utc) - last_tod).total_seconds()
+                if 0 <= elapsed < 300:
+                    await interaction.followup.send(
+                        f"⏱️ **{config['name']}**'s ToD was already set <t:{int(last_tod.timestamp())}:R> "
+                        f"(less than 5 minutes ago). Skipping to avoid a double-reset.", ephemeral=True)
+                    return
+            except (ValueError, TypeError):
+                pass
         tod_time = datetime.now(timezone.utc)
         duration_hours = config['duration_hours']
         event_start_time = tod_time + timedelta(hours=config['respawn_hours'])

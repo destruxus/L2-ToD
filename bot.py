@@ -82,6 +82,17 @@ def setup_database():
         );
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS public_warnings (
+            server_id INTEGER NOT NULL,
+            boss_key TEXT NOT NULL,
+            message_id INTEGER,
+            warned_start TEXT,
+            phase TEXT,
+            tod_at_post TEXT,
+            PRIMARY KEY (server_id, boss_key)
+        );
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS custom_bosses (
             server_id      INTEGER NOT NULL,
             boss_key       TEXT NOT NULL,
@@ -1457,6 +1468,94 @@ async def wipe_my_data(interaction: discord.Interaction):
 
 # --- Automated Background Task ---
 @tasks.loop(minutes=1)
+async def public_warning_loop():
+    """20-min-before window warnings in the public channel for the public bosses.
+    Message lifecycle per boss: 'opens soon' -> (if missed) 'window missed, next window'
+    (re-projected each cycle) -> deleted when a new ToD is set."""
+    now = datetime.now(timezone.utc)
+    WARN_LEAD = 20  # minutes
+    conn = db_connect()
+    cur = conn.cursor()
+    servers = cur.execute("SELECT server_id, public_channel_id FROM servers WHERE public_channel_id IS NOT NULL").fetchall()
+    for server_id, public_channel_id in servers:
+        for boss_key in PUBLIC_OVERVIEW_BOSSES:
+            trow = cur.execute("SELECT tod_time, start_time, duration_hours FROM timer_states WHERE server_id = ? AND boss_key = ?", (server_id, boss_key)).fetchone()
+            wrow = cur.execute("SELECT message_id, warned_start, phase, tod_at_post FROM public_warnings WHERE server_id = ? AND boss_key = ?", (server_id, boss_key)).fetchone()
+            config = await _get_boss_config(server_id, boss_key)
+            if not config:
+                continue
+            bossname = config['name']
+            respawn_hours = config['respawn_hours']
+            # If a new ToD was set since the warning was posted -> delete the warning.
+            if wrow and trow and trow[0] and wrow[3] and trow[0] != wrow[3]:
+                await _delete_public_warning(server_id, boss_key, public_channel_id, wrow[0], cur)
+                wrow = None
+            if not trow or not trow[1]:
+                continue
+            start = datetime.fromisoformat(trow[1])
+            tod_time = trow[0]
+            # Project the next window if the current one has passed (rolling).
+            projected_start = start
+            while projected_start + timedelta(minutes=1) < now:
+                projected_start = projected_start + timedelta(hours=respawn_hours)
+            minutes_to_start = (start - now).total_seconds() / 60.0
+            # PHASE 1: upcoming window, within 20 minutes, no warning yet for this window.
+            if 0 < minutes_to_start <= WARN_LEAD and (not wrow or wrow[1] != trow[1]):
+                if wrow:
+                    await _delete_public_warning(server_id, boss_key, public_channel_id, wrow[0], cur)
+                text = f"⏰ **{bossname}** window opens <t:{int(start.timestamp())}:R> (<t:{int(start.timestamp())}:t>)."
+                mid = await _send_public_warning(public_channel_id, text)
+                if mid:
+                    cur.execute("INSERT INTO public_warnings (server_id, boss_key, message_id, warned_start, phase, tod_at_post) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(server_id, boss_key) DO UPDATE SET message_id=excluded.message_id, warned_start=excluded.warned_start, phase=excluded.phase, tod_at_post=excluded.tod_at_post", (server_id, boss_key, mid, trow[1], "upcoming", tod_time))
+            # PHASE 2: window missed (start passed, still same ToD) -> edit to missed/next.
+            elif wrow and now > start and wrow[2] != "missed_" + str(int(projected_start.timestamp())):
+                next_start = projected_start if projected_start > now else projected_start + timedelta(hours=respawn_hours)
+                text = f"⚠️ **{bossname}** window missed — new window opens <t:{int(next_start.timestamp())}:R> (<t:{int(next_start.timestamp())}:t>)."
+                ok = await _edit_public_warning(public_channel_id, wrow[0], text)
+                if ok:
+                    cur.execute("UPDATE public_warnings SET phase = ? WHERE server_id = ? AND boss_key = ?", ("missed_" + str(int(projected_start.timestamp())), server_id, boss_key))
+    conn.commit()
+    conn.close()
+
+
+async def _send_public_warning(channel_id, text):
+    try:
+        ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        msg = await ch.send(text, allowed_mentions=discord.AllowedMentions.none())
+        return msg.id
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+        print(f"public warning send failed: {e}")
+        return None
+
+
+async def _edit_public_warning(channel_id, message_id, text):
+    try:
+        ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        msg = await ch.fetch_message(message_id)
+        await msg.edit(content=text, allowed_mentions=discord.AllowedMentions.none())
+        return True
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return False
+
+
+async def _delete_public_warning(server_id, boss_key, channel_id, message_id, cur):
+    try:
+        ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        msg = await ch.fetch_message(message_id)
+        await msg.delete()
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        pass
+    cur.execute("DELETE FROM public_warnings WHERE server_id = ? AND boss_key = ?", (server_id, boss_key))
+
+
+@public_warning_loop.before_loop
+async def before_public_warning_loop():
+    await bot.wait_until_ready()
+
+
+
+
+@tasks.loop(minutes=1)
 async def announcement_loop():
     # Post announcements for windows opening within the configured lead time.
     # announced_for stores the window start already announced: one ping per window.
@@ -1608,6 +1707,7 @@ async def on_ready():
     check_all_boss_windows.start()
     cleanup_stale_servers.start()
     announcement_loop.start()
+    public_warning_loop.start()
 
 @check_all_boss_windows.before_loop
 async def before_check():

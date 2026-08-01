@@ -93,6 +93,17 @@ def setup_database():
         );
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS officer_warnings (
+            server_id INTEGER NOT NULL,
+            boss_key TEXT NOT NULL,
+            message_id INTEGER,
+            warned_start TEXT,
+            phase TEXT,
+            tod_at_post TEXT,
+            PRIMARY KEY (server_id, boss_key)
+        );
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS custom_bosses (
             server_id      INTEGER NOT NULL,
             boss_key       TEXT NOT NULL,
@@ -1468,6 +1479,92 @@ async def wipe_my_data(interaction: discord.Interaction):
 
 # --- Automated Background Task ---
 @tasks.loop(minutes=1)
+async def officer_warning_loop():
+    """20-min-before window warnings in the officer overview channel for ALL bosses.
+    Two states: 'opens soon' -> 'open now'. No tagging. No 'missed' phase:
+    the message is deleted when a ToD is set OR when the window closes unclaimed."""
+    now = datetime.now(timezone.utc)
+    WARN_LEAD = 20
+    conn = db_connect()
+    cur = conn.cursor()
+    servers = cur.execute("SELECT server_id, timer_channel_id FROM servers WHERE timer_channel_id IS NOT NULL").fetchall()
+    for server_id, timer_channel_id in servers:
+        # Iterate all configured bosses (defaults + custom) that have an active timer.
+        timers = {r[0]: r for r in cur.execute("SELECT boss_key, tod_time, start_time, duration_hours FROM timer_states WHERE server_id = ?", (server_id,)).fetchall()}
+        warnings = {r[0]: r for r in cur.execute("SELECT boss_key, message_id, warned_start, phase, tod_at_post FROM officer_warnings WHERE server_id = ?", (server_id,)).fetchall()}
+        for boss_key, trow in timers.items():
+            _, tod_time, start_iso, duration_hours = trow
+            wrow = warnings.get(boss_key)
+            config = await _get_boss_config(server_id, boss_key)
+            if not config or not start_iso:
+                continue
+            bossname = config['name']
+            start = datetime.fromisoformat(start_iso)
+            end = start + timedelta(hours=duration_hours)
+            # Delete if a new ToD was set since the warning was posted.
+            if wrow and tod_time and wrow[4] and tod_time != wrow[4]:
+                await _delete_officer_warning(server_id, boss_key, timer_channel_id, wrow[1], cur)
+                warnings.pop(boss_key, None); wrow = None
+            minutes_to_start = (start - now).total_seconds() / 60.0
+            # PHASE 1: within 20 min of opening.
+            if 0 < minutes_to_start <= WARN_LEAD and (not wrow or wrow[2] != start_iso):
+                if wrow:
+                    await _delete_officer_warning(server_id, boss_key, timer_channel_id, wrow[1], cur)
+                text = f"⏰ **{bossname}** window opens <t:{int(start.timestamp())}:R> (<t:{int(start.timestamp())}:t>)."
+                mid = await _send_officer_warning(timer_channel_id, text)
+                if mid:
+                    cur.execute("INSERT INTO officer_warnings (server_id, boss_key, message_id, warned_start, phase, tod_at_post) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(server_id, boss_key) DO UPDATE SET message_id=excluded.message_id, warned_start=excluded.warned_start, phase=excluded.phase, tod_at_post=excluded.tod_at_post", (server_id, boss_key, mid, start_iso, "upcoming", tod_time))
+            # PHASE 2: window open (start..end) -> 'open now'.
+            elif wrow and start <= now <= end and wrow[3] != "open_" + start_iso:
+                text = f"🟢 **{bossname}** window is **open now** — closes <t:{int(end.timestamp())}:R> (<t:{int(end.timestamp())}:t>)."
+                ok = await _edit_officer_warning(timer_channel_id, wrow[1], text)
+                if ok:
+                    cur.execute("UPDATE officer_warnings SET phase = ? WHERE server_id = ? AND boss_key = ?", ("open_" + start_iso, server_id, boss_key))
+            # WINDOW CLOSED unclaimed -> delete the message (no 'missed' phase for officers).
+            elif wrow and now > end:
+                await _delete_officer_warning(server_id, boss_key, timer_channel_id, wrow[1], cur)
+    conn.commit()
+    conn.close()
+
+
+async def _send_officer_warning(channel_id, text):
+    try:
+        ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        msg = await ch.send(text, allowed_mentions=discord.AllowedMentions.none())
+        return msg.id
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+        print(f"officer warning send failed: {e}")
+        return None
+
+
+async def _edit_officer_warning(channel_id, message_id, text):
+    try:
+        ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        msg = await ch.fetch_message(message_id)
+        await msg.edit(content=text, allowed_mentions=discord.AllowedMentions.none())
+        return True
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return False
+
+
+async def _delete_officer_warning(server_id, boss_key, channel_id, message_id, cur):
+    try:
+        ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        msg = await ch.fetch_message(message_id)
+        await msg.delete()
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        pass
+    cur.execute("DELETE FROM officer_warnings WHERE server_id = ? AND boss_key = ?", (server_id, boss_key))
+
+
+@officer_warning_loop.before_loop
+async def before_officer_warning_loop():
+    await bot.wait_until_ready()
+
+
+
+
+@tasks.loop(minutes=1)
 async def public_warning_loop():
     """20-min-before window warnings in the public channel for the public bosses.
     Message lifecycle per boss: 'opens soon' -> (if missed) 'window missed, next window'
@@ -1716,6 +1813,7 @@ async def on_ready():
     cleanup_stale_servers.start()
     announcement_loop.start()
     public_warning_loop.start()
+    officer_warning_loop.start()
 
 @check_all_boss_windows.before_loop
 async def before_check():

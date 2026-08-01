@@ -67,6 +67,21 @@ def setup_database():
         );
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tod_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_id INTEGER NOT NULL,
+            boss_key TEXT NOT NULL,
+            set_by_user_id INTEGER,
+            created_at TEXT,
+            reverted INTEGER NOT NULL DEFAULT 0,
+            prev_tod_time TEXT,
+            prev_start_time TEXT,
+            prev_end_time TEXT,
+            prev_duration_hours REAL,
+            prev_status TEXT
+        );
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS custom_bosses (
             server_id      INTEGER NOT NULL,
             boss_key       TEXT NOT NULL,
@@ -725,6 +740,9 @@ class PublicTodButton(ui.Button):
         event_end_time = event_start_time + timedelta(hours=duration_hours)
         conn = db_connect()
         cursor = conn.cursor()
+        prev = cursor.execute("SELECT tod_time, start_time, end_time, duration_hours, status FROM timer_states WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, self.boss_key)).fetchone()
+        cursor.execute("INSERT INTO tod_history (server_id, boss_key, set_by_user_id, created_at, reverted, prev_tod_time, prev_start_time, prev_end_time, prev_duration_hours, prev_status) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)", (interaction.guild_id, self.boss_key, interaction.user.id, tod_time.isoformat(), prev[0] if prev else None, prev[1] if prev else None, prev[2] if prev else None, prev[3] if prev else None, prev[4] if prev else None))
+        history_id = cursor.lastrowid
         cursor.execute("""
             INSERT INTO timer_states (server_id, boss_key, tod_time, start_time, end_time, duration_hours, status)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -753,14 +771,101 @@ class PublicTodButton(ui.Button):
         if row:
             try:
                 report_channel = await bot.fetch_channel(row[0])
-                await report_channel.send(embed=embed)
+                await report_channel.send(embed=embed, view=RevertView(history_id))
                 report_sent = True
             except (discord.Forbidden, discord.HTTPException) as e:
                 print(f"PublicTodButton: could not post to report channel: {e}")
         ack = f"✅ **{config['name']}** — ToD set to <t:{int(tod_time.timestamp())}:t>."
         if not report_sent:
             ack += " (Report could not be posted to the report channel.)"
-        await interaction.followup.send(ack, ephemeral=True)
+        await interaction.followup.send(ack, view=RevertView(history_id), ephemeral=True)
+
+
+class RevertButton(ui.Button):
+    """Reverts a public-button ToD set back to the state before that click.
+    Allowed for the original setter OR anyone with the officer timer-role."""
+    def __init__(self, history_id: int):
+        super().__init__(label="Revert", emoji="↩️", style=discord.ButtonStyle.secondary,
+                         custom_id=f"revert_{history_id}")
+        self.history_id = history_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        conn = db_connect()
+        cur = conn.cursor()
+        h = cur.execute("SELECT server_id, boss_key, set_by_user_id, reverted, prev_tod_time, prev_start_time, prev_end_time, prev_duration_hours, prev_status FROM tod_history WHERE id = ?", (self.history_id,)).fetchone()
+        if not h:
+            conn.close()
+            await interaction.followup.send("❌ This revert is no longer available.", ephemeral=True)
+            return
+        server_id, boss_key, set_by, reverted, p_tod, p_start, p_end, p_dur, p_status = h
+        if reverted:
+            conn.close()
+            await interaction.followup.send("ℹ️ This action was already reverted.", ephemeral=True)
+            return
+        # Permission: original setter OR officer timer-role
+        allowed = (interaction.user.id == set_by)
+        if not allowed:
+            role_row = cur.execute("SELECT timer_role_id FROM servers WHERE server_id = ?", (server_id,)).fetchone()
+            role_id = role_row[0] if role_row else None
+            member = interaction.user
+            if isinstance(member, discord.Member):
+                if member.guild_permissions.administrator:
+                    allowed = True
+                elif role_id and any(r.id == role_id for r in member.roles):
+                    allowed = True
+                elif role_id is None:
+                    allowed = True
+        if not allowed:
+            conn.close()
+            await interaction.followup.send("❌ Only the person who set this timer or an officer can revert it.", ephemeral=True)
+            return
+        config = await _get_boss_config(server_id, boss_key)
+        bossname = config['name'] if config else boss_key
+        if p_tod is None:
+            # No prior timer existed: delete the current one.
+            cur.execute("DELETE FROM timer_states WHERE server_id = ? AND boss_key = ?", (server_id, boss_key))
+            outcome = f"↩️ **{bossname}** timer reverted — no previous timer existed, so it was cleared."
+        else:
+            cur.execute("""
+                INSERT INTO timer_states (server_id, boss_key, tod_time, start_time, end_time, duration_hours, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(server_id, boss_key) DO UPDATE SET
+                    tod_time=excluded.tod_time, start_time=excluded.start_time, end_time=excluded.end_time,
+                    duration_hours=excluded.duration_hours, status=excluded.status;
+            """, (server_id, boss_key, p_tod, p_start, p_end, p_dur, p_status))
+            outcome = f"↩️ **{bossname}** ToD reverted to <t:{int(datetime.fromisoformat(p_tod).timestamp())}:f>."
+        cur.execute("UPDATE tod_history SET reverted = 1 WHERE id = ?", (self.history_id,))
+        conn.commit()
+        conn.close()
+        await post_or_update_overview(server_id)
+        # Notify officer channel
+        conn3 = db_connect()
+        arow = conn3.cursor().execute("SELECT alerts_channel_id FROM servers WHERE server_id = ?", (server_id,)).fetchone()
+        conn3.close()
+        if arow:
+            try:
+                ach = await bot.fetch_channel(arow[0])
+                await ach.send(f"↩️ **{bossname}** ToD reverted by {interaction.user.display_name}.")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+        # Disable this button on the message it lives on
+        try:
+            view = ui.View.from_message(interaction.message)
+            for item in view.children:
+                item.disabled = True
+            await interaction.message.edit(view=view)
+        except Exception:
+            pass
+        await interaction.followup.send(outcome, ephemeral=True)
+
+
+class RevertView(ui.View):
+    def __init__(self, history_id: int):
+        super().__init__(timeout=None)
+        self.add_item(RevertButton(history_id))
+
+
 
 
 class PublicBossTimerView(ui.View):
@@ -1462,6 +1567,15 @@ async def on_ready():
     persistent_entries += [(key, name, None) for key, name in all_custom]
     bot.add_view(BossTimerView(persistent_entries))
     bot.add_view(PublicBossTimerView())
+    # Re-register revert buttons for any history rows not yet reverted (survive restarts).
+    try:
+        conn_r = db_connect()
+        pending = conn_r.cursor().execute("SELECT id FROM tod_history WHERE reverted = 0").fetchall()
+        conn_r.close()
+        for (hid,) in pending:
+            bot.add_view(RevertView(hid))
+    except Exception as e:
+        print(f"Could not re-register revert views: {e}")
 
     bot.tree.add_command(tod_group)
     bot.tree.add_command(boss_group)

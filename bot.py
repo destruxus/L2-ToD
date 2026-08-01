@@ -1494,6 +1494,8 @@ async def public_warning_loop():
                 continue
             start = datetime.fromisoformat(trow[1])
             tod_time = trow[0]
+            duration_hours = trow[2]
+            end = start + timedelta(hours=duration_hours)
             # Project the next window if the current one has passed (rolling).
             projected_start = start
             while projected_start + timedelta(minutes=1) < now:
@@ -1507,8 +1509,14 @@ async def public_warning_loop():
                 mid = await _send_public_warning(public_channel_id, text)
                 if mid:
                     cur.execute("INSERT INTO public_warnings (server_id, boss_key, message_id, warned_start, phase, tod_at_post) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(server_id, boss_key) DO UPDATE SET message_id=excluded.message_id, warned_start=excluded.warned_start, phase=excluded.phase, tod_at_post=excluded.tod_at_post", (server_id, boss_key, mid, trow[1], "upcoming", tod_time))
-            # PHASE 2: window missed (start passed, still same ToD) -> edit to missed/next.
-            elif wrow and now > start and wrow[2] != "missed_" + str(int(projected_start.timestamp())):
+            # PHASE 2: window is OPEN (start passed, end not yet) -> show 'open now'.
+            elif wrow and start <= now <= end and wrow[2] != "open_" + trow[1]:
+                text = f"🟢 **{bossname}** window is **open now** — closes <t:{int(end.timestamp())}:R> (<t:{int(end.timestamp())}:t>)."
+                ok = await _edit_public_warning(public_channel_id, wrow[0], text)
+                if ok:
+                    cur.execute("UPDATE public_warnings SET phase = ? WHERE server_id = ? AND boss_key = ?", ("open_" + trow[1], server_id, boss_key))
+            # PHASE 3: window MISSED (end passed, still same ToD) -> edit to missed/next.
+            elif wrow and now > end and wrow[2] != "missed_" + str(int(projected_start.timestamp())):
                 next_start = projected_start if projected_start > now else projected_start + timedelta(hours=respawn_hours)
                 text = f"⚠️ **{bossname}** window missed — new window opens <t:{int(next_start.timestamp())}:R> (<t:{int(next_start.timestamp())}:t>)."
                 ok = await _edit_public_warning(public_channel_id, wrow[0], text)

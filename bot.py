@@ -369,6 +369,9 @@ class TodNowButton(ui.Button):
 
         conn = db_connect()
         cursor = conn.cursor()
+        prev = cursor.execute("SELECT tod_time, start_time, end_time, duration_hours, status FROM timer_states WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, self.boss_key)).fetchone()
+        cursor.execute("INSERT INTO tod_history (server_id, boss_key, set_by_user_id, created_at, reverted, prev_tod_time, prev_start_time, prev_end_time, prev_duration_hours, prev_status) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)", (interaction.guild_id, self.boss_key, interaction.user.id, tod_time.isoformat(), prev[0] if prev else None, prev[1] if prev else None, prev[2] if prev else None, prev[3] if prev else None, prev[4] if prev else None))
+        history_id = cursor.lastrowid
         cursor.execute("""
             INSERT INTO timer_states (server_id, boss_key, tod_time, start_time, end_time, duration_hours, status)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -407,7 +410,7 @@ class TodNowButton(ui.Button):
         if row:
             try:
                 report_channel = await bot.fetch_channel(row[0])
-                await report_channel.send(embed=embed)  # type: ignore[union-attr]
+                await report_channel.send(embed=embed, view=RevertView(history_id))  # type: ignore[union-attr]
                 report_sent = True
             except (discord.Forbidden, discord.HTTPException) as e:
                 print(f"TodNowButton: could not post to report channel: {e}")
@@ -415,7 +418,7 @@ class TodNowButton(ui.Button):
         ack = f"✅ **{config['name']}** — ToD set to <t:{int(tod_time.timestamp())}:t>."
         if not report_sent:
             ack += " (Report could not be posted to the report channel.)"
-        await interaction.followup.send(ack, ephemeral=True)
+        await interaction.followup.send(ack, view=RevertView(history_id), ephemeral=True)
 
 async def _fetch_timer_rows(guild_id: int):
     """Return sorted timer rows for the given guild."""
@@ -1004,6 +1007,9 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, tod_time
 
     conn = db_connect()
     cursor = conn.cursor()
+    prev = cursor.execute("SELECT tod_time, start_time, end_time, duration_hours, status FROM timer_states WHERE server_id = ? AND boss_key = ?", (interaction.guild_id, boss_key.upper())).fetchone()
+    cursor.execute("INSERT INTO tod_history (server_id, boss_key, set_by_user_id, created_at, reverted, prev_tod_time, prev_start_time, prev_end_time, prev_duration_hours, prev_status) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)", (interaction.guild_id, boss_key.upper(), interaction.user.id, tod_time.isoformat(), prev[0] if prev else None, prev[1] if prev else None, prev[2] if prev else None, prev[3] if prev else None, prev[4] if prev else None))
+    history_id = cursor.lastrowid
     cursor.execute("""
         INSERT INTO timer_states (server_id, boss_key, tod_time, start_time, end_time, duration_hours, status) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(server_id, boss_key) DO UPDATE SET
@@ -1026,7 +1032,7 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, tod_time
     if config.get("imageUrl"):
         embed.set_thumbnail(url=config["imageUrl"])
 
-    await interaction.edit_original_response(embed=embed)
+    await interaction.edit_original_response(embed=embed, view=RevertView(history_id))
     await post_or_update_overview(interaction.guild_id)
 
 async def _process_reset(interaction: discord.Interaction, boss_key: str) -> None:

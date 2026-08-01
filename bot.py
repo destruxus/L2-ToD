@@ -1514,12 +1514,17 @@ async def officer_warning_loop():
                 mid = await _send_officer_warning(timer_channel_id, text)
                 if mid:
                     cur.execute("INSERT INTO officer_warnings (server_id, boss_key, message_id, warned_start, phase, tod_at_post) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(server_id, boss_key) DO UPDATE SET message_id=excluded.message_id, warned_start=excluded.warned_start, phase=excluded.phase, tod_at_post=excluded.tod_at_post", (server_id, boss_key, mid, start_iso, "upcoming", tod_time))
-            # PHASE 2: window open (start..end) -> 'open now'.
-            elif wrow and start <= now <= end and wrow[3] != "open_" + start_iso:
+            # PHASE 2: window open (start..end) -> 'open now'. Post fresh if we have no message yet.
+            elif start <= now <= end and (not wrow or wrow[3] != "open_" + start_iso):
                 text = f"🟢 **{bossname}** window is **open now** — closes <t:{int(end.timestamp())}:R> (<t:{int(end.timestamp())}:t>)."
-                ok = await _edit_officer_warning(timer_channel_id, wrow[1], text)
-                if ok:
-                    cur.execute("UPDATE officer_warnings SET phase = ? WHERE server_id = ? AND boss_key = ?", ("open_" + start_iso, server_id, boss_key))
+                if wrow:
+                    ok = await _edit_officer_warning(timer_channel_id, wrow[1], text)
+                    if ok:
+                        cur.execute("UPDATE officer_warnings SET phase = ? WHERE server_id = ? AND boss_key = ?", ("open_" + start_iso, server_id, boss_key))
+                else:
+                    mid = await _send_officer_warning(timer_channel_id, text)
+                    if mid:
+                        cur.execute("INSERT INTO officer_warnings (server_id, boss_key, message_id, warned_start, phase, tod_at_post) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(server_id, boss_key) DO UPDATE SET message_id=excluded.message_id, warned_start=excluded.warned_start, phase=excluded.phase, tod_at_post=excluded.tod_at_post", (server_id, boss_key, mid, start_iso, "open_" + start_iso, tod_time))
             # WINDOW CLOSED unclaimed -> delete the message (no 'missed' phase for officers).
             elif wrow and now > end:
                 await _delete_officer_warning(server_id, boss_key, timer_channel_id, wrow[1], cur)
@@ -1606,12 +1611,17 @@ async def public_warning_loop():
                 mid = await _send_public_warning(public_channel_id, text)
                 if mid:
                     cur.execute("INSERT INTO public_warnings (server_id, boss_key, message_id, warned_start, phase, tod_at_post) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(server_id, boss_key) DO UPDATE SET message_id=excluded.message_id, warned_start=excluded.warned_start, phase=excluded.phase, tod_at_post=excluded.tod_at_post", (server_id, boss_key, mid, trow[1], "upcoming", tod_time))
-            # PHASE 2: window is OPEN (start passed, end not yet) -> show 'open now'.
-            elif wrow and start <= now <= end and wrow[2] != "open_" + trow[1]:
+            # PHASE 2: window is OPEN (start passed, end not yet) -> show 'open now'. Post fresh if no message yet.
+            elif start <= now <= end and (not wrow or wrow[2] != "open_" + trow[1]):
                 text = f"🟢 **{bossname}** window is **open now** — closes <t:{int(end.timestamp())}:R> (<t:{int(end.timestamp())}:t>)."
-                ok = await _edit_public_warning(public_channel_id, wrow[0], text)
-                if ok:
-                    cur.execute("UPDATE public_warnings SET phase = ? WHERE server_id = ? AND boss_key = ?", ("open_" + trow[1], server_id, boss_key))
+                if wrow:
+                    ok = await _edit_public_warning(public_channel_id, wrow[0], text)
+                    if ok:
+                        cur.execute("UPDATE public_warnings SET phase = ? WHERE server_id = ? AND boss_key = ?", ("open_" + trow[1], server_id, boss_key))
+                else:
+                    mid = await _send_public_warning(public_channel_id, text)
+                    if mid:
+                        cur.execute("INSERT INTO public_warnings (server_id, boss_key, message_id, warned_start, phase, tod_at_post) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(server_id, boss_key) DO UPDATE SET message_id=excluded.message_id, warned_start=excluded.warned_start, phase=excluded.phase, tod_at_post=excluded.tod_at_post", (server_id, boss_key, mid, trow[1], "open_" + trow[1], tod_time))
             # PHASE 3: window MISSED (end passed, still same ToD) -> edit to missed/next.
             elif wrow and now > end and wrow[2] != "missed_" + str(int(projected_start.timestamp())):
                 next_start = projected_start if projected_start > now else projected_start + timedelta(hours=respawn_hours)

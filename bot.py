@@ -990,12 +990,14 @@ async def post_or_update_overview(guild_id: Optional[int]) -> None:
 async def _process_tod(interaction: discord.Interaction, boss_key: str, tod_time_utc: Optional[datetime] = None) -> None:
     await interaction.response.defer()
     if interaction.guild_id is None:
-        await interaction.edit_original_response(content="❌ Could not determine the server context.")
+        await interaction.delete_original_response()
+        await interaction.followup.send("❌ Could not determine the server context.", ephemeral=True)
         return
 
     config = await _get_boss_config(interaction.guild_id, boss_key)
     if not config:
-        await interaction.edit_original_response(content=f"❌ Boss `{boss_key}` not found. Use `/boss add` to add a custom boss.")
+        await interaction.delete_original_response()
+        await interaction.followup.send(f"❌ Boss `{boss_key}` not found. Use `/boss add` to add a custom boss.", ephemeral=True)
         return
 
     tod_time = tod_time_utc if tod_time_utc is not None else datetime.now(timezone.utc)

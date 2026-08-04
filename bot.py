@@ -36,7 +36,13 @@ DATABASE_FILE = os.getenv("DATABASE_FILE", "bot_database.db")
 
 # --- Database Helper Functions ---
 def db_connect():
-    return sqlite3.connect(DATABASE_FILE)
+    conn = sqlite3.connect(DATABASE_FILE, timeout=30)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=30000;")
+    except sqlite3.Error:
+        pass
+    return conn
 
 def setup_database():
     conn = db_connect()

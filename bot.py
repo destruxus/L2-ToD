@@ -1591,6 +1591,13 @@ async def officer_warning_loop():
                     plan.append({"act": "send", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "text": text, "warned_start": start_iso, "phase": "open_" + start_iso, "tod": tod_time})
             elif wrow and now > end:
                 plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "mid": wrow[1]})
+        # Reconcile orphaned warnings: a boss with a live warning message but no
+        # timer row (timer was reset or the boss removed) is never revisited by the
+        # loop above, so its "open now"/upcoming message would be stranded with a
+        # close time that keeps counting into the past. Delete those.
+        for orphan_key, orphan_wrow in warnings.items():
+            if orphan_key not in timers:
+                plan.append({"act": "delete", "sid": server_id, "bk": orphan_key, "ch": timer_channel_id, "mid": orphan_wrow[1]})
     conn.close()
     writes = await _run_warning_plan(plan, _send_officer_warning, _edit_officer_warning, _delete_warning_message)
     if writes:
@@ -1635,6 +1642,11 @@ async def public_warning_loop():
                 plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "mid": wrow[0]})
                 continue
             if not trow or not trow[1]:
+                # Orphaned warning: the boss has a live warning message but no timer
+                # (reset or removed). Delete it so it isn't stranded showing "open now"
+                # with a close time counting into the past.
+                if wrow:
+                    plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "mid": wrow[0]})
                 continue
             start = datetime.fromisoformat(trow[1])
             tod_time = trow[0]

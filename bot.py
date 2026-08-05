@@ -208,6 +208,59 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+# --- Discord logging (warnings + errors to a dedicated channel) ---
+LOG_CHANNEL_ID = 1534286573858852975
+_log_last_sent = {}  # message-hash -> last-sent monotonic time, for dedupe/flood control
+
+
+async def log_to_discord(level: str, message: str) -> None:
+    """Post a WARNING/ERROR line to the log channel. Never raises; never blocks the bot.
+    Deduplicates identical messages within a 5-minute window to prevent flooding."""
+    try:
+        import time as _time
+        key = f"{level}:{message}"
+        now = _time.monotonic()
+        last = _log_last_sent.get(key)
+        if last is not None and (now - last) < 300:
+            return  # same message sent < 5 min ago; suppress
+        _log_last_sent[key] = now
+        # prune old entries to avoid unbounded growth
+        if len(_log_last_sent) > 200:
+            cutoff = now - 300
+            for k in [k for k, t in _log_last_sent.items() if t < cutoff]:
+                _log_last_sent.pop(k, None)
+        prefix = "⚠️ **WARNING**" if level == "WARNING" else "❌ **ERROR**"
+        ch = bot.get_channel(LOG_CHANNEL_ID)
+        if ch is None:
+            ch = await bot.fetch_channel(LOG_CHANNEL_ID)
+        text = f"{prefix}: {message}"
+        if len(text) > 1900:
+            text = text[:1900] + "…"
+        await ch.send(text, allowed_mentions=discord.AllowedMentions.none())
+    except Exception:
+        pass  # logging must never crash the bot
+
+
+def log_loop_errors(coro):
+    """Decorator: if a background loop iteration raises, report it to the log
+    channel (and console) instead of letting the exception kill the task."""
+    import functools
+    @functools.wraps(coro)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await coro(*args, **kwargs)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"Loop {coro.__name__} error: {tb}")
+            try:
+                await log_to_discord("ERROR", f"Background task `{coro.__name__}` failed: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+    return wrapper
+
+
+
 # --- UI Views ---
 LEAD_TIME_CHOICES = [5, 10, 15, 30, 45, 60, 90, 120]
 
@@ -1493,6 +1546,7 @@ async def wipe_my_data(interaction: discord.Interaction):
 
 # --- Automated Background Task ---
 @tasks.loop(minutes=1)
+@log_loop_errors
 async def officer_warning_loop():
     """20-min-before window warnings in the officer overview channel for ALL bosses.
     Read DB -> close -> do Discord calls -> single short write. Never holds the
@@ -1549,6 +1603,7 @@ async def officer_warning_loop():
 
 
 @tasks.loop(minutes=1)
+@log_loop_errors
 async def public_warning_loop():
     """20-min-before window warnings in the public channel for the public bosses.
     Same read->close->act->write structure as the officer loop."""
@@ -1691,6 +1746,7 @@ async def before_public_warning_loop():
 
 
 @tasks.loop(minutes=1)
+@log_loop_errors
 async def announcement_loop():
     # Post announcements for windows opening within the configured lead time.
     # announced_for stores the window start already announced: one ping per window.
@@ -1734,6 +1790,7 @@ async def before_announcement_loop():
 
 
 @tasks.loop(minutes=1)
+@log_loop_errors
 async def check_all_boss_windows():
     conn = db_connect()
     conn.row_factory = sqlite3.Row
@@ -1810,6 +1867,7 @@ async def on_ready():
             bot.add_view(RevertView(hid))
     except Exception as e:
         print(f"Could not re-register revert views: {e}")
+        asyncio.create_task(log_to_discord("ERROR", f"Could not re-register revert views: {e}"))
 
     bot.tree.add_command(tod_group)
     bot.tree.add_command(boss_group)
@@ -1831,6 +1889,7 @@ async def on_ready():
             print("Slash commands synced globally.")
     except discord.HTTPException as e:
         print(f"ERROR: Failed to sync slash commands: {e}")
+        asyncio.create_task(log_to_discord("ERROR", f"Failed to sync slash commands: {e}"))
 
     # Refresh overview embeds for all configured servers
     conn = db_connect()
@@ -1840,6 +1899,7 @@ async def on_ready():
         await post_or_update_overview(server_id)
 
     check_all_boss_windows.start()
+    asyncio.create_task(log_to_discord("WARNING", "Bot started — logging is active. This channel will receive warnings and errors."))
     cleanup_stale_servers.start()
     announcement_loop.start()
     public_warning_loop.start()
@@ -1850,6 +1910,7 @@ async def before_check():
     await bot.wait_until_ready()
 
 @tasks.loop(hours=6)
+@log_loop_errors
 async def cleanup_stale_servers():
     """Remove data for servers the bot can no longer reach (kicked, or the
     configured channel was deleted / access lost) after a 7-day grace period.
@@ -1902,6 +1963,7 @@ async def on_guild_join(guild: discord.Guild):
         print(f"Synced commands to new guild: {guild.name} ({guild.id})")
     except discord.HTTPException as e:
         print(f"ERROR: Failed to sync commands to new guild {guild.id}: {e}")
+        asyncio.create_task(log_to_discord("ERROR", f"Failed to sync commands to new guild {guild.id}: {e}"))
 
 
 @bot.tree.error
@@ -1912,6 +1974,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         msg = "❌ You don't have permission to use this command."
     else:
         print(f"Unhandled command error: {error}")
+        asyncio.create_task(log_to_discord("ERROR", f"Unhandled command error: {error}"))
         msg = "⚠️ Something went wrong while running this command."
     try:
         if interaction.response.is_done():

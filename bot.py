@@ -1573,6 +1573,11 @@ async def officer_warning_loop():
             if wrow and tod_time and wrow[4] and tod_time != wrow[4]:
                 plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "mid": wrow[1]})
                 continue
+            # Stale-window guard: if the warning tracks a window that no longer matches
+            # the timer's current window (e.g. the window rolled forward), delete it.
+            if wrow and wrow[2] != start_iso:
+                plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "mid": wrow[1]})
+                continue
             if 0 < minutes_to_start <= WARN_LEAD and (not wrow or wrow[2] != start_iso):
                 text = f"⏰ **{bossname}** window opens <t:{int(start.timestamp())}:R> (<t:{int(start.timestamp())}:t>)."
                 if wrow:
@@ -1623,6 +1628,10 @@ async def public_warning_loop():
             bossname = config["name"]
             respawn_hours = config["respawn_hours"]
             if wrow and trow and trow[0] and wrow[3] and trow[0] != wrow[3]:
+                plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "mid": wrow[0]})
+                continue
+            # Stale-window guard: warning tracks a window that no longer matches the timer.
+            if wrow and trow and trow[1] and wrow[1] != trow[1]:
                 plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "mid": wrow[0]})
                 continue
             if not trow or not trow[1]:

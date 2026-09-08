@@ -1470,6 +1470,7 @@ async def help_command(interaction: discord.Interaction):
         "**/overview** — private snapshot of all timers\n"
         "**/timestamp** `<time>` `[timezone]` — convert any time expression to Discord timestamps\n"
         "**/configure** — initial bot setup (admin)\n"
+        "**/sync** — import timers from env peers (admin)\n"
         "**/options lost_window** — toggle automated lost window (admin)\n"
         "**/wipe_my_data** — delete all server data (admin)\n"
         "**/privacy** — privacy policy\n"
@@ -2286,6 +2287,17 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     except discord.HTTPException:
         pass
 
+
+from tod_sync_l2 import attach_l2_tod_sync
+
+attach_l2_tod_sync(
+    bot,
+    db_connect=db_connect,
+    boss_config=BOSS_CONFIG,
+    get_boss_config=_get_boss_config,
+    post_or_update_overview=post_or_update_overview,
+    is_configured=_is_configured,
+)
 
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:

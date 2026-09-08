@@ -66,6 +66,27 @@ The SQLite database is stored in `./data/` on the host via a volume, so it survi
 
 Invite the bot, then an administrator runs `/configure` and answers the DM wizard. Note: by default Discord may show slash commands to admins only; adjust visibility under Server Settings -> Integrations if needed.
 
+## Peer sync (Ally1 / Ally2)
+
+Timer commands stay unchanged. A sidecar HTTP API speaks the same pull-only format as the other TOD bots (`/v1/tod-sync`). Sync is off until `TOD_SYNC_ORIGIN` and `TOD_SYNC_SECRET` are set (use the **same secret** on every bot).
+
+| Bot | Host port | Container port | Health URL |
+|---|---|---|---|
+| Ally1 | **8081** | 8080 | `http://<ally1-host>:8081/v1/tod-sync/health` |
+| Ally2 | **8082** | 8080 | `http://<ally2-host>:8082/v1/tod-sync/health` |
+| L2-ToD | **8083** | 8080 | `http://<l2-tod-host>:8083/v1/tod-sync/health` |
+
+Bots on separate machines cannot use Docker's `8081-8090` scan. Paste extra base URLs (port required) in `TOD_SYNC_PEERS` on **each** side:
+
+```
+TOD_SYNC_NAME=L2-ToD
+TOD_SYNC_ORIGIN=l2-tod
+TOD_SYNC_SECRET=the-same-shared-secret
+TOD_SYNC_PEERS=http://ALLY1_PUBLIC_IP:8081,http://ALLY2_PUBLIC_IP:8082
+```
+
+On Ally1 / Ally2, add this bot with `TOD_SYNC_PEERS=http://L2TOD_PUBLIC_IP:8083` (and allow origin `l2-tod` in their `/sync` if they still pick bosses). L2-ToD exports **every raid boss** as soon as `TOD_SYNC_PEERS` is set. Optional `/sync` on L2-ToD is only for importing their windows here.
+
 ## License
 
 GNU Affero General Public License v3.0 — see the LICENSE file.

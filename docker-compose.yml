@@ -8,6 +8,11 @@ services:
     # Securely load the secrets from the .env file
     env_file:
       - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Host 8083 is the L2-ToD slot in 8081-8090 (Ally1 8081, Ally2 8082).
+    ports:
+      - "8083:8080"
     # Create a persistent volume for the database
     # This links the bot_database.db file inside the container
     # to a file named 'data/bot_database.db' on your host machine.
@@ -17,3 +22,4 @@ services:
     environment:
       - DATABASE_FILE=/app/data/bot_database.db
       - PYTHONUNBUFFERED=1
+      - TOD_SYNC_PORT=8080

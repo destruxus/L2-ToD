@@ -135,6 +135,18 @@ def setup_database():
             FOREIGN KEY(server_id) REFERENCES servers(server_id) ON DELETE CASCADE
         );
     """)
+    # Per-window public visibility overrides used by the Call out / Call off buttons.
+    # enabled = 1 (shown in public) / 0 (hidden); window_start ties the override to one
+    # specific boss window so it auto-resets to the boss's default on the next window.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS public_toggle (
+            server_id    INTEGER NOT NULL,
+            boss_key     TEXT NOT NULL,
+            enabled      INTEGER NOT NULL,
+            window_start TEXT,
+            PRIMARY KEY (server_id, boss_key)
+        );
+    """)
     for migration in [
         "ALTER TABLE servers ADD COLUMN timer_channel_id INTEGER NOT NULL DEFAULT 0;",
         "ALTER TABLE servers ADD COLUMN overview_message_id INTEGER;",
@@ -1627,6 +1639,213 @@ async def wipe_my_data(interaction: discord.Interaction):
     elif view.value is False:
         await interaction.followup.send("Deletion cancelled.", ephemeral=True)
 
+# --- Raid call-out / participation configuration ---
+# Epics get their officer warning far in advance (24h) instead of 20 min, then a
+# "bump" (re-post) at the 20-min mark so it resurfaces at the bottom of the channel.
+EPIC_BOSSES = {"VALAKAS", "ANTHARAS", "BAIUM", "BELETH"}
+EPIC_OFFICER_LEAD_MIN = 24 * 60      # epics: warn 24 hours ahead
+DEFAULT_OFFICER_LEAD_MIN = 20        # everyone else: warn 20 minutes ahead
+PUBLIC_LEAD_MIN = 20                 # auto public bosses appear 20 min ahead
+# Reaction-based sign-ups on every public warning (Discord shows counts + names natively).
+REACT_PARTICIPATE = "⚔️"
+REACT_CAMERA = "📷"
+PUBLIC_LEGEND = "\n\n⚔️ react to join · 📷 react if you set a camera"
+
+
+def _boss_config_sync(cur, server_id, boss_key):
+    """Synchronous boss lookup (no await) for use inside planning helpers.
+    Prefers a per-server custom boss, else falls back to the built-in defaults."""
+    row = cur.execute(
+        "SELECT name, respawn_hours, duration_hours, imageUrl FROM custom_bosses WHERE server_id = ? AND boss_key = ?",
+        (server_id, boss_key)).fetchone()
+    if row:
+        return {"name": row[0], "respawn_hours": row[1], "duration_hours": row[2], "imageUrl": row[3], "emoji": "🗡️"}
+    return BOSS_CONFIG.get(boss_key)
+
+
+def _effective_public_on(cur, server_id, boss_key, start_iso):
+    """Whether this boss should currently be shown in the public channel.
+    Default: auto-public bosses (Orfen/AQ/Core) are ON, everything else OFF.
+    A public_toggle row overrides that, but only for the exact window it was set for —
+    so Call out / Call off apply to the current window and reset on the next one."""
+    default_on = boss_key in PUBLIC_OVERVIEW_BOSSES
+    row = cur.execute(
+        "SELECT enabled, window_start FROM public_toggle WHERE server_id = ? AND boss_key = ?",
+        (server_id, boss_key)).fetchone()
+    if row is not None and start_iso is not None and row[1] == start_iso:
+        return bool(row[0])
+    return default_on
+
+
+class CallRaidButton(ui.Button):
+    """Officer-channel toggle. Publishes a raid warning to the public channel
+    (Call out) or removes it (Call off). Anyone who can see the officer channel
+    may press it. State is stored per boss window in public_toggle."""
+    def __init__(self, boss_key: str, enabled: bool = False):
+        super().__init__(
+            label="Call off" if enabled else "Call out",
+            style=discord.ButtonStyle.danger if enabled else discord.ButtonStyle.success,
+            custom_id=f"callraid_{boss_key}")
+        self.boss_key = boss_key
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        server_id = interaction.guild_id
+        if server_id is None:
+            await interaction.followup.send("❌ No server context.", ephemeral=True)
+            return
+        bk = self.boss_key
+        conn = db_connect()
+        cur = conn.cursor()
+        trow = cur.execute(
+            "SELECT start_time FROM timer_states WHERE server_id = ? AND boss_key = ?",
+            (server_id, bk)).fetchone()
+        start_iso = trow[0] if trow else None
+        if not start_iso:
+            conn.close()
+            await interaction.followup.send("❌ No active window for this boss right now.", ephemeral=True)
+            return
+        new_enabled = not _effective_public_on(cur, server_id, bk, start_iso)
+        cur.execute(
+            "INSERT INTO public_toggle (server_id, boss_key, enabled, window_start) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(server_id, boss_key) DO UPDATE SET enabled=excluded.enabled, window_start=excluded.window_start",
+            (server_id, bk, 1 if new_enabled else 0, start_iso))
+        conn.commit()
+        conn.close()
+        # Flip the button on this officer message immediately.
+        try:
+            await interaction.message.edit(view=CallToggleView(bk, new_enabled))
+        except (discord.HTTPException, AttributeError):
+            pass
+        # Post to / remove from the public channel right away (loop keeps it in sync after).
+        await sync_public_for_boss(server_id, bk)
+        await interaction.followup.send(
+            "📣 Called **out** — the warning is now in the public channel." if new_enabled
+            else "🔕 Called **off** — the warning was removed from the public channel.",
+            ephemeral=True)
+
+
+class CallToggleView(ui.View):
+    """One-button persistent view carrying a CallRaidButton for a single boss."""
+    def __init__(self, boss_key: str, enabled: bool = False):
+        super().__init__(timeout=None)
+        self.add_item(CallRaidButton(boss_key, enabled))
+
+
+def _plan_public_for_boss(cur, server_id, public_channel_id, boss_key, now):
+    """Decide what (if anything) the public channel should show for one boss right now,
+    returning a list of plan actions (send/edit/delete). Auto bosses appear 20 min ahead;
+    manually called-out raids appear immediately and stay until their window ends."""
+    plan = []
+    trow = cur.execute(
+        "SELECT tod_time, start_time, duration_hours FROM timer_states WHERE server_id = ? AND boss_key = ?",
+        (server_id, boss_key)).fetchone()
+    wrow = cur.execute(
+        "SELECT message_id, warned_start, phase, tod_at_post FROM public_warnings WHERE server_id = ? AND boss_key = ?",
+        (server_id, boss_key)).fetchone()
+    start_iso = trow[1] if (trow and trow[1]) else None
+
+    def _delete():
+        return {"act": "delete", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "mid": wrow[0]}
+
+    # Not enabled for public, or no active window -> make sure nothing is posted.
+    if not _effective_public_on(cur, server_id, boss_key, start_iso):
+        if wrow:
+            plan.append(_delete())
+        return plan
+    if not trow or not trow[1]:
+        if wrow:
+            plan.append(_delete())
+        return plan
+    tod_time, _s, duration_hours = trow
+    # ToD changed, or the window rolled forward -> drop the stale message.
+    if wrow and tod_time and wrow[3] and tod_time != wrow[3]:
+        plan.append(_delete())
+        return plan
+    if wrow and wrow[1] != start_iso:
+        plan.append(_delete())
+        return plan
+    config = _boss_config_sync(cur, server_id, boss_key)
+    if not config:
+        if wrow:
+            plan.append(_delete())
+        return plan
+    bossname = config["name"]
+    respawn_hours = config["respawn_hours"]
+    start = datetime.fromisoformat(start_iso)
+    end = start + timedelta(hours=duration_hours)
+    default_on = boss_key in PUBLIC_OVERVIEW_BOSSES
+    lead = PUBLIC_LEAD_MIN if default_on else 10 ** 9  # manual call-outs show immediately
+    mts = (start - now).total_seconds() / 60.0
+    projected_start = start
+    while projected_start + timedelta(minutes=1) < now:
+        projected_start = projected_start + timedelta(hours=respawn_hours)
+    up_text = f"⏰ **{bossname}** window opens <t:{int(start.timestamp())}:R> (<t:{int(start.timestamp())}:t>)."
+    open_text = f"🟢 **{bossname}** window is **open now** — closes <t:{int(end.timestamp())}:R> (<t:{int(end.timestamp())}:t>)."
+    if 0 < mts <= lead and (not wrow or wrow[1] != start_iso):
+        if wrow:
+            plan.append(_delete())
+        plan.append({"act": "send", "sid": server_id, "bk": boss_key, "ch": public_channel_id,
+                     "text": up_text, "warned_start": start_iso, "phase": "upcoming", "tod": tod_time})
+    elif start <= now <= end and (not wrow or wrow[2] != "open_" + start_iso):
+        if wrow:
+            plan.append({"act": "edit", "sid": server_id, "bk": boss_key, "ch": public_channel_id,
+                         "mid": wrow[0], "text": open_text, "phase": "open_" + start_iso})
+        else:
+            plan.append({"act": "send", "sid": server_id, "bk": boss_key, "ch": public_channel_id,
+                         "text": open_text, "warned_start": start_iso, "phase": "open_" + start_iso, "tod": tod_time})
+    elif wrow and now > end:
+        if default_on:
+            tag = "missed_" + str(int(projected_start.timestamp()))
+            if wrow[2] != tag:
+                next_start = projected_start if projected_start > now else projected_start + timedelta(hours=respawn_hours)
+                miss_text = (f"⚠️ **{bossname}** window missed — new window opens "
+                             f"<t:{int(next_start.timestamp())}:R> (<t:{int(next_start.timestamp())}:t>).")
+                plan.append({"act": "edit", "sid": server_id, "bk": boss_key, "ch": public_channel_id,
+                             "mid": wrow[0], "text": miss_text, "phase": tag})
+        else:
+            # A manually called-out raid whose window has ended -> clear it from public.
+            plan.append(_delete())
+    return plan
+
+
+def _write_public_warnings(writes):
+    """Persist the results of a public-warning plan (shared by the loop and sync helper)."""
+    if not writes:
+        return
+    conn = db_connect()
+    cur = conn.cursor()
+    for w in writes:
+        if w["op"] == "delete":
+            cur.execute("DELETE FROM public_warnings WHERE server_id = ? AND boss_key = ?", (w["sid"], w["bk"]))
+        elif w["op"] == "upsert":
+            cur.execute(
+                "INSERT INTO public_warnings (server_id, boss_key, message_id, warned_start, phase, tod_at_post) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(server_id, boss_key) DO UPDATE SET "
+                "message_id=excluded.message_id, warned_start=excluded.warned_start, phase=excluded.phase, tod_at_post=excluded.tod_at_post",
+                (w["sid"], w["bk"], w["mid"], w["warned_start"], w["phase"], w["tod"]))
+        elif w["op"] == "phase":
+            cur.execute("UPDATE public_warnings SET phase = ? WHERE server_id = ? AND boss_key = ?", (w["phase"], w["sid"], w["bk"]))
+    conn.commit()
+    conn.close()
+
+
+async def sync_public_for_boss(server_id, boss_key):
+    """Immediately reconcile the public channel for one boss (used right after a
+    Call out / Call off press so the change shows without waiting for the loop)."""
+    conn = db_connect()
+    row = conn.cursor().execute("SELECT public_channel_id FROM servers WHERE server_id = ?", (server_id,)).fetchone()
+    if not row or not row[0]:
+        conn.close()
+        return
+    public_channel_id = row[0]
+    now = datetime.now(timezone.utc)
+    plan = _plan_public_for_boss(conn.cursor(), server_id, public_channel_id, boss_key, now)
+    conn.close()
+    writes = await _run_warning_plan(plan, _send_public_warning, _edit_public_warning, _delete_warning_message)
+    _write_public_warnings(writes)
+
+
 # --- Automated Background Task ---
 @tasks.loop(minutes=1)
 @log_loop_errors
@@ -1635,7 +1854,6 @@ async def officer_warning_loop():
     Read DB -> close -> do Discord calls -> single short write. Never holds the
     connection across network calls (avoids 'database is locked')."""
     now = datetime.now(timezone.utc)
-    WARN_LEAD = 20
     conn = db_connect()
     cur = conn.cursor()
     servers = cur.execute("SELECT server_id, timer_channel_id FROM servers WHERE timer_channel_id IS NOT NULL").fetchall()
@@ -1653,6 +1871,10 @@ async def officer_warning_loop():
             start = datetime.fromisoformat(start_iso)
             end = start + timedelta(hours=duration_hours)
             minutes_to_start = (start - now).total_seconds() / 60.0
+            # How far ahead this boss is warned, and its current public-visibility state
+            # (drives the Call out / Call off button label attached to the message).
+            lead = EPIC_OFFICER_LEAD_MIN if boss_key in EPIC_BOSSES else DEFAULT_OFFICER_LEAD_MIN
+            enabled = _effective_public_on(cur, server_id, boss_key, start_iso)
             if wrow and tod_time and wrow[4] and tod_time != wrow[4]:
                 plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "mid": wrow[1]})
                 continue
@@ -1661,17 +1883,26 @@ async def officer_warning_loop():
             if wrow and wrow[2] != start_iso:
                 plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "mid": wrow[1]})
                 continue
-            if 0 < minutes_to_start <= WARN_LEAD and (not wrow or wrow[2] != start_iso):
-                text = f"⏰ **{bossname}** window opens <t:{int(start.timestamp())}:R> (<t:{int(start.timestamp())}:t>)."
-                if wrow:
-                    plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "mid": wrow[1]})
-                plan.append({"act": "send", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "text": text, "warned_start": start_iso, "phase": "upcoming", "tod": tod_time})
-            elif start <= now <= end and (not wrow or wrow[3] != "open_" + start_iso):
-                text = f"🟢 **{bossname}** window is **open now** — closes <t:{int(end.timestamp())}:R> (<t:{int(end.timestamp())}:t>)."
-                if wrow:
-                    plan.append({"act": "edit", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "mid": wrow[1], "text": text, "phase": "open_" + start_iso})
-                else:
-                    plan.append({"act": "send", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "text": text, "warned_start": start_iso, "phase": "open_" + start_iso, "tod": tod_time})
+            pre_text = f"⏰ **{bossname}** window opens <t:{int(start.timestamp())}:R> (<t:{int(start.timestamp())}:t>)."
+            open_text = f"🟢 **{bossname}** window is **open now** — closes <t:{int(end.timestamp())}:R> (<t:{int(end.timestamp())}:t>)."
+            if start <= now <= end:
+                want = "open_" + start_iso
+                if not wrow:
+                    plan.append({"act": "send", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "text": open_text, "warned_start": start_iso, "phase": want, "tod": tod_time, "enabled": enabled})
+                elif wrow[3] != want:
+                    plan.append({"act": "edit", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "mid": wrow[1], "text": open_text, "phase": want, "enabled": enabled})
+            elif 0 < minutes_to_start <= lead:
+                # "adv_" while far out (epics only), "soon_" within the last 20 minutes.
+                want = ("soon_" if minutes_to_start <= DEFAULT_OFFICER_LEAD_MIN else "adv_") + start_iso
+                if not wrow:
+                    plan.append({"act": "send", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "text": pre_text, "warned_start": start_iso, "phase": want, "tod": tod_time, "enabled": enabled})
+                elif wrow[3] != want:
+                    if boss_key in EPIC_BOSSES and want.startswith("soon_") and str(wrow[3]).startswith("adv_"):
+                        # 20-minute bump: re-post so the epic warning pops back to the bottom.
+                        plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "mid": wrow[1]})
+                        plan.append({"act": "send", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "text": pre_text, "warned_start": start_iso, "phase": want, "tod": tod_time, "enabled": enabled})
+                    else:
+                        plan.append({"act": "edit", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "mid": wrow[1], "text": pre_text, "phase": want, "enabled": enabled})
             elif wrow and now > end:
                 plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": timer_channel_id, "mid": wrow[1]})
         # Reconcile orphaned warnings: a boss with a live warning message but no
@@ -1703,126 +1934,88 @@ async def public_warning_loop():
     """20-min-before window warnings in the public channel for the public bosses.
     Same read->close->act->write structure as the officer loop."""
     now = datetime.now(timezone.utc)
-    WARN_LEAD = 20
     conn = db_connect()
     cur = conn.cursor()
     servers = cur.execute("SELECT server_id, public_channel_id FROM servers WHERE public_channel_id IS NOT NULL").fetchall()
     plan = []
     for server_id, public_channel_id in servers:
-        for boss_key in PUBLIC_OVERVIEW_BOSSES:
-            trow = cur.execute("SELECT tod_time, start_time, duration_hours FROM timer_states WHERE server_id = ? AND boss_key = ?", (server_id, boss_key)).fetchone()
-            wrow = cur.execute("SELECT message_id, warned_start, phase, tod_at_post FROM public_warnings WHERE server_id = ? AND boss_key = ?", (server_id, boss_key)).fetchone()
-            config = await _get_boss_config(server_id, boss_key)
-            if not config:
-                continue
-            bossname = config["name"]
-            respawn_hours = config["respawn_hours"]
-            if wrow and trow and trow[0] and wrow[3] and trow[0] != wrow[3]:
-                plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "mid": wrow[0]})
-                continue
-            # Stale-window guard: warning tracks a window that no longer matches the timer.
-            if wrow and trow and trow[1] and wrow[1] != trow[1]:
-                plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "mid": wrow[0]})
-                continue
-            if not trow or not trow[1]:
-                # Orphaned warning: the boss has a live warning message but no timer
-                # (reset or removed). Delete it so it isn't stranded showing "open now"
-                # with a close time counting into the past.
-                if wrow:
-                    plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "mid": wrow[0]})
-                continue
-            start = datetime.fromisoformat(trow[1])
-            tod_time = trow[0]
-            duration_hours = trow[2]
-            end = start + timedelta(hours=duration_hours)
-            projected_start = start
-            while projected_start + timedelta(minutes=1) < now:
-                projected_start = projected_start + timedelta(hours=respawn_hours)
-            minutes_to_start = (start - now).total_seconds() / 60.0
-            if 0 < minutes_to_start <= WARN_LEAD and (not wrow or wrow[1] != trow[1]):
-                text = f"⏰ **{bossname}** window opens <t:{int(start.timestamp())}:R> (<t:{int(start.timestamp())}:t>)."
-                if wrow:
-                    plan.append({"act": "delete", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "mid": wrow[0]})
-                plan.append({"act": "send", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "text": text, "warned_start": trow[1], "phase": "upcoming", "tod": tod_time})
-            elif start <= now <= end and (not wrow or wrow[2] != "open_" + trow[1]):
-                text = f"🟢 **{bossname}** window is **open now** — closes <t:{int(end.timestamp())}:R> (<t:{int(end.timestamp())}:t>)."
-                if wrow:
-                    plan.append({"act": "edit", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "mid": wrow[0], "text": text, "phase": "open_" + trow[1]})
-                else:
-                    plan.append({"act": "send", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "text": text, "warned_start": trow[1], "phase": "open_" + trow[1], "tod": tod_time})
-            elif wrow and now > end and wrow[2] != "missed_" + str(int(projected_start.timestamp())):
-                next_start = projected_start if projected_start > now else projected_start + timedelta(hours=respawn_hours)
-                text = f"⚠️ **{bossname}** window missed — new window opens <t:{int(next_start.timestamp())}:R> (<t:{int(next_start.timestamp())}:t>)."
-                plan.append({"act": "edit", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "mid": wrow[0], "text": text, "phase": "missed_" + str(int(projected_start.timestamp()))})
+        # Candidates = the always-public bosses, any boss manually called out, and any
+        # boss that currently has a public warning posted (so it can be cleaned up).
+        candidates = set(PUBLIC_OVERVIEW_BOSSES)
+        for (bk,) in cur.execute("SELECT boss_key FROM public_toggle WHERE server_id = ? AND enabled = 1", (server_id,)).fetchall():
+            candidates.add(bk)
+        for (bk,) in cur.execute("SELECT boss_key FROM public_warnings WHERE server_id = ?", (server_id,)).fetchall():
+            candidates.add(bk)
+        for boss_key in candidates:
+            plan.extend(_plan_public_for_boss(cur, server_id, public_channel_id, boss_key, now))
     conn.close()
     writes = await _run_warning_plan(plan, _send_public_warning, _edit_public_warning, _delete_warning_message)
-    if writes:
-        conn = db_connect()
-        cur = conn.cursor()
-        for w in writes:
-            if w["op"] == "delete":
-                cur.execute("DELETE FROM public_warnings WHERE server_id = ? AND boss_key = ?", (w["sid"], w["bk"]))
-            elif w["op"] == "upsert":
-                cur.execute("INSERT INTO public_warnings (server_id, boss_key, message_id, warned_start, phase, tod_at_post) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(server_id, boss_key) DO UPDATE SET message_id=excluded.message_id, warned_start=excluded.warned_start, phase=excluded.phase, tod_at_post=excluded.tod_at_post", (w["sid"], w["bk"], w["mid"], w["warned_start"], w["phase"], w["tod"]))
-            elif w["op"] == "phase":
-                cur.execute("UPDATE public_warnings SET phase = ? WHERE server_id = ? AND boss_key = ?", (w["phase"], w["sid"], w["bk"]))
-        conn.commit()
-        conn.close()
+    _write_public_warnings(writes)
 
 
 async def _run_warning_plan(plan, send_fn, edit_fn, delete_fn):
-    """Execute Discord actions with NO DB connection held. Return the DB writes to apply."""
+    """Execute Discord actions with NO DB connection held. Return the DB writes to apply.
+    The whole plan entry (p) is passed to send/edit so officer warnings can attach the
+    Call out/off button and public warnings can add sign-up reactions."""
     writes = []
     for p in plan:
         if p["act"] == "delete":
             await delete_fn(p["ch"], p["mid"])
             writes.append({"op": "delete", "sid": p["sid"], "bk": p["bk"]})
         elif p["act"] == "edit":
-            ok = await edit_fn(p["ch"], p["mid"], p["text"])
+            ok = await edit_fn(p["ch"], p["mid"], p["text"], p)
             if ok:
                 writes.append({"op": "phase", "sid": p["sid"], "bk": p["bk"], "phase": p["phase"]})
         elif p["act"] == "send":
-            mid = await send_fn(p["ch"], p["text"])
+            mid = await send_fn(p["ch"], p["text"], p)
             if mid:
-                writes.append({"op": "upsert", "sid": p["sid"], "bk": p["bk"], "mid": mid, "warned_start": p["warned_start"], "phase": p["phase"], "tod": p["tod"]})
+                writes.append({"op": "upsert", "sid": p["sid"], "bk": p["bk"], "mid": mid, "warned_start": p["warned_start"], "phase": p["phase"], "tod": p.get("tod")})
     return writes
 
 
-async def _send_officer_warning(channel_id, text):
+async def _send_officer_warning(channel_id, text, p=None):
     try:
         ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
-        msg = await ch.send(text, allowed_mentions=discord.AllowedMentions.none())
+        view = CallToggleView(p["bk"], p.get("enabled", False)) if p else None
+        msg = await ch.send(text, view=view, allowed_mentions=discord.AllowedMentions.none())
         return msg.id
     except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
         print(f"officer warning send failed: {e}")
         return None
 
 
-async def _edit_officer_warning(channel_id, message_id, text):
+async def _edit_officer_warning(channel_id, message_id, text, p=None):
     try:
         ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
         msg = await ch.fetch_message(message_id)
-        await msg.edit(content=text, allowed_mentions=discord.AllowedMentions.none())
+        view = CallToggleView(p["bk"], p.get("enabled", False)) if p else None
+        await msg.edit(content=text, view=view, allowed_mentions=discord.AllowedMentions.none())
         return True
     except (discord.NotFound, discord.Forbidden, discord.HTTPException):
         return False
 
 
-async def _send_public_warning(channel_id, text):
+async def _send_public_warning(channel_id, text, p=None):
     try:
         ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
-        msg = await ch.send(text, allowed_mentions=discord.AllowedMentions.none())
+        msg = await ch.send(text + PUBLIC_LEGEND, allowed_mentions=discord.AllowedMentions.none())
+        # Seed the two sign-up reactions so members can join / flag a camera.
+        try:
+            await msg.add_reaction(REACT_PARTICIPATE)
+            await msg.add_reaction(REACT_CAMERA)
+        except discord.HTTPException:
+            pass
         return msg.id
     except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
         print(f"public warning send failed: {e}")
         return None
 
 
-async def _edit_public_warning(channel_id, message_id, text):
+async def _edit_public_warning(channel_id, message_id, text, p=None):
     try:
         ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
         msg = await ch.fetch_message(message_id)
-        await msg.edit(content=text, allowed_mentions=discord.AllowedMentions.none())
+        await msg.edit(content=text + PUBLIC_LEGEND, allowed_mentions=discord.AllowedMentions.none())
         return True
     except (discord.NotFound, discord.Forbidden, discord.HTTPException):
         return False
@@ -1962,6 +2155,11 @@ async def on_ready():
     persistent_entries += [(key, name, None) for key, name in all_custom]
     bot.add_view(BossTimerView(persistent_entries))
     bot.add_view(PublicBossTimerView())
+    # Register Call out / Call off buttons (one per boss) so they work after a restart.
+    for _bk in list(BOSS_CONFIG.keys()):
+        bot.add_view(CallToggleView(_bk))
+    for _key, _name in all_custom:
+        bot.add_view(CallToggleView(_key))
     # Re-register revert buttons for any history rows not yet reverted (survive restarts).
     try:
         conn_r = db_connect()

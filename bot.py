@@ -135,6 +135,19 @@ def setup_database():
             FOREIGN KEY(server_id) REFERENCES servers(server_id) ON DELETE CASCADE
         );
     """)
+    # "Verify the ToD" notices: raised when an epic boss's window closes without a
+    # ToD being recorded. One standalone message per boss, cleared after 24h.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS verify_warnings (
+            server_id           INTEGER NOT NULL,
+            boss_key            TEXT NOT NULL,
+            message_id          INTEGER,
+            flagged_at          TEXT NOT NULL,
+            missed_window_start TEXT,
+            tod_at_flag         TEXT,
+            PRIMARY KEY (server_id, boss_key)
+        );
+    """)
     # Read-only copies of a server's overview embed, posted into other channels
     # (often in a different Discord server) so allied clans can see the same board.
     cursor.execute("""
@@ -1781,6 +1794,28 @@ PUBLIC_LEAD_MIN = 20                 # auto public bosses appear 20 min ahead
 REACT_PARTICIPATE = "⚔️"
 REACT_CAMERA = "📷"
 PUBLIC_LEGEND = "\n\n⚔️ react to join · 📷 react if you set a camera"
+# How long a "verify the ToD" notice stays up after an epic window closes unrecorded.
+VERIFY_WINDOW_HOURS = 24
+
+
+def _flag_tod_verify(cursor, server_id, boss_key, missed_window_start, tod_at_flag, now) -> bool:
+    """Record that an epic boss's window closed with no ToD recorded.
+
+    Idempotent per missed window: re-running for the same window does nothing, but a
+    later window being missed again refreshes the notice. Returns True only when a new
+    flag was actually raised (so the caller knows something changed)."""
+    row = cursor.execute(
+        "SELECT missed_window_start FROM verify_warnings WHERE server_id = ? AND boss_key = ?",
+        (server_id, boss_key)).fetchone()
+    if row is not None and row[0] == missed_window_start:
+        return False
+    cursor.execute(
+        "INSERT INTO verify_warnings (server_id, boss_key, message_id, flagged_at, missed_window_start, tod_at_flag) "
+        "VALUES (?, ?, NULL, ?, ?, ?) ON CONFLICT(server_id, boss_key) DO UPDATE SET "
+        "message_id=NULL, flagged_at=excluded.flagged_at, "
+        "missed_window_start=excluded.missed_window_start, tod_at_flag=excluded.tod_at_flag",
+        (server_id, boss_key, now.isoformat(), missed_window_start, tod_at_flag))
+    return True
 
 
 def _boss_config_sync(cur, server_id, boss_key):
@@ -2171,6 +2206,83 @@ async def before_public_warning_loop():
     await bot.wait_until_ready()
 
 
+@tasks.loop(minutes=1)
+@log_loop_errors
+async def verify_warning_loop():
+    """Standalone 'verify the ToD' notices for the epic bosses.
+
+    When an epic's window closes with no ToD recorded, check_all_boss_windows raises a
+    flag. Here we post ONE message in the officer channel asking someone to verify it,
+    keep it for VERIFY_WINDOW_HOURS, then delete it — or delete it early as soon as a
+    new ToD is recorded (or the timer is reset). Same read -> close -> act -> write
+    discipline as the other warning loops: no DB connection held across Discord calls."""
+    now = datetime.now(timezone.utc)
+    conn = db_connect()
+    cur = conn.cursor()
+    rows = cur.execute(
+        "SELECT v.server_id, v.boss_key, v.message_id, v.flagged_at, v.tod_at_flag, s.timer_channel_id "
+        "FROM verify_warnings v JOIN servers s ON s.server_id = v.server_id"
+    ).fetchall()
+    current_tods = {
+        (sid, bk): tod for sid, bk, tod in
+        cur.execute("SELECT server_id, boss_key, tod_time FROM timer_states").fetchall()
+    }
+    conn.close()
+
+    to_post, to_drop = [], []
+    for server_id, boss_key, message_id, flagged_at, tod_at_flag, channel_id in rows:
+        try:
+            flagged = datetime.fromisoformat(flagged_at)
+        except (TypeError, ValueError):
+            to_drop.append((server_id, boss_key, channel_id, message_id))
+            continue
+        if flagged.tzinfo is None:
+            flagged = flagged.replace(tzinfo=timezone.utc)
+        # A different ToD (or no timer at all) means somebody verified/reset it.
+        resolved = current_tods.get((server_id, boss_key), "__no_timer__") != tod_at_flag
+        expired = (now - flagged) > timedelta(hours=VERIFY_WINDOW_HOURS)
+        if resolved or expired:
+            to_drop.append((server_id, boss_key, channel_id, message_id))
+        elif not message_id and channel_id:
+            to_post.append((server_id, boss_key, channel_id, flagged))
+
+    writes = []
+    for server_id, boss_key, channel_id, message_id in to_drop:
+        if message_id and channel_id:
+            await _delete_warning_message(channel_id, message_id)
+        writes.append(("drop", server_id, boss_key, None))
+    for server_id, boss_key, channel_id, flagged in to_post:
+        config = await _get_boss_config(server_id, boss_key)
+        name = config["name"] if config else boss_key
+        emoji = config.get("emoji", "") if config else ""
+        text = (
+            f"❓ {emoji} **{name}** — the window closed with **no ToD recorded** "
+            f"(<t:{int(flagged.timestamp())}:R>).\n"
+            f"› Please **verify the ToD** for this boss and set it with `/tod set`.\n"
+            f"› This notice clears automatically after {VERIFY_WINDOW_HOURS}h, or as soon as a ToD is set."
+        )
+        mid = await _send_officer_warning(channel_id, text, None)
+        if mid:
+            writes.append(("posted", server_id, boss_key, mid))
+
+    if writes:
+        conn = db_connect()
+        cur = conn.cursor()
+        for op, server_id, boss_key, mid in writes:
+            if op == "drop":
+                cur.execute("DELETE FROM verify_warnings WHERE server_id = ? AND boss_key = ?", (server_id, boss_key))
+            else:
+                cur.execute("UPDATE verify_warnings SET message_id = ? WHERE server_id = ? AND boss_key = ?",
+                            (mid, server_id, boss_key))
+        conn.commit()
+        conn.close()
+
+
+@verify_warning_loop.before_loop
+async def before_verify_warning_loop():
+    await bot.wait_until_ready()
+
+
 
 
 @tasks.loop(minutes=1)
@@ -2231,6 +2343,14 @@ async def check_all_boss_windows():
         end_time = datetime.fromisoformat(timer['end_time'])
         if datetime.now(timezone.utc) <= end_time:
             continue
+
+        # Epic window just closed with no ToD recorded -> raise a "verify the ToD"
+        # notice. Done before the lost-window check so it fires even when that
+        # automation is switched off for the server.
+        if timer['boss_key'] in EPIC_BOSSES:
+            if _flag_tod_verify(cursor, timer['server_id'], timer['boss_key'],
+                                timer['start_time'], timer['tod_time'], datetime.now(timezone.utc)):
+                affected_servers.add(timer['server_id'])
 
         server_config = cursor.execute("SELECT * FROM servers WHERE server_id = ?", (timer['server_id'],)).fetchone()
         if not server_config or not server_config['lost_window_enabled']:
@@ -2337,6 +2457,7 @@ async def on_ready():
     announcement_loop.start()
     public_warning_loop.start()
     officer_warning_loop.start()
+    verify_warning_loop.start()
 
 @check_all_boss_windows.before_loop
 async def before_check():

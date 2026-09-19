@@ -1273,6 +1273,54 @@ tod_group = app_commands.Group(name="tod", description="Boss timer commands")
 boss_group = app_commands.Group(name="boss", description="Manage custom bosses")
 
 # ── /tod set ──────────────────────────────────────────────────────────────────
+TOD_PARSE_HELP = (
+    "❌ Could not parse that time. Use a Discord timestamp like `<t:1234567890:F>` "
+    "or natural language like `yesterday 8pm`, `tuesday 20:30`, `22 feb 21:00` (UTC)."
+)
+
+
+def _parse_tod_input(raw: str) -> Optional[datetime]:
+    """Parse a Time of Death from a Discord timestamp tag or natural language (UTC).
+
+    Shared by the slash-command option and the modal so both accept exactly the
+    same formats. Returns None when the text can't be understood."""
+    if not raw:
+        return None
+    match = re.search(r'<t:(\d+)(?::[A-Za-z])?>', raw)
+    if match:
+        return datetime.fromtimestamp(int(match.group(1)), tz=timezone.utc)
+    return dateparser.parse(
+        raw,
+        settings={
+            'RETURN_AS_TIMEZONE_AWARE': True,
+            'TO_TIMEZONE': 'UTC',
+            'PREFER_DATES_FROM': 'past',
+        }
+    )
+
+
+class TodTimestampModal(ui.Modal):  # type: ignore[call-arg]
+    """Pops up as soon as 'Timestamp' is chosen, so the time can be typed straight
+    away instead of going back to fill a second slash-command option."""
+    timestamp = ui.TextInput(
+        label="Time of Death",
+        placeholder="<t:1234567890:F>  ·  yesterday 8pm  ·  tuesday 20:30  ·  22 feb 21:00 (UTC)",
+        required=True,
+        max_length=100,
+    )
+
+    def __init__(self, boss_key: str, boss_name: str):
+        super().__init__(title=f"Time of Death — {boss_name}"[:45])
+        self.boss_key = boss_key
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        tod_time = _parse_tod_input(str(self.timestamp.value).strip())
+        if tod_time is None:
+            await interaction.response.send_message(TOD_PARSE_HELP, ephemeral=True)
+            return
+        await _process_tod(interaction, self.boss_key, tod_time)
+
+
 @tod_group.command(name="set", description="Set the Time of Death for a boss.")
 @app_commands.autocomplete(boss=all_boss_autocomplete)
 @app_commands.describe(
@@ -1294,30 +1342,16 @@ async def tod_set(interaction: discord.Interaction, boss: str, when: app_command
         tod_time = datetime.now(timezone.utc) - timedelta(minutes=10)
     elif when.value == "timestamp":
         if not timestamp:
-            await interaction.response.send_message(
-                "❌ Please provide a timestamp when selecting 'Timestamp'.", ephemeral=True)
+            # Nothing typed into the optional field — open a modal so the time can be
+            # entered immediately, instead of erroring and making the user start over.
+            config = await _get_boss_config(interaction.guild_id, boss)
+            boss_name = config["name"] if config else boss
+            await interaction.response.send_modal(TodTimestampModal(boss, boss_name))
             return
-        # Try Discord timestamp format first: <t:1234567890:F>
-        match = re.search(r'<t:(\d+)(?::[A-Za-z])?>', timestamp)
-        if match:
-            tod_time = datetime.fromtimestamp(int(match.group(1)), tz=timezone.utc)
-        else:
-            # Fall back to natural language (assumed UTC)
-            parsed = dateparser.parse(
-                timestamp,
-                settings={
-                    'RETURN_AS_TIMEZONE_AWARE': True,
-                    'TO_TIMEZONE': 'UTC',
-                    'PREFER_DATES_FROM': 'past',
-                }
-            )
-            if not parsed:
-                await interaction.response.send_message(
-                    "❌ Could not parse that time. Use a Discord timestamp like `<t:1234567890:F>` "
-                    "or natural language like `yesterday 8pm`, `tuesday 20:30`, `22 feb 21:00` (UTC).",
-                    ephemeral=True)
-                return
-            tod_time = parsed
+        tod_time = _parse_tod_input(timestamp)
+        if tod_time is None:
+            await interaction.response.send_message(TOD_PARSE_HELP, ephemeral=True)
+            return
 
     await _process_tod(interaction, boss, tod_time)
 

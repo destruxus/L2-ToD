@@ -135,6 +135,16 @@ def setup_database():
             FOREIGN KEY(server_id) REFERENCES servers(server_id) ON DELETE CASCADE
         );
     """)
+    # Read-only copies of a server's overview embed, posted into other channels
+    # (often in a different Discord server) so allied clans can see the same board.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS overview_mirrors (
+            source_server_id INTEGER NOT NULL,
+            channel_id       INTEGER NOT NULL,
+            message_id       INTEGER,
+            PRIMARY KEY (source_server_id, channel_id)
+        );
+    """)
     # Per-window public visibility overrides used by the Call out / Call off buttons.
     # enabled = 1 (shown in public) / 0 (hidden); window_start ties the override to one
     # specific boss window so it auto-resets to the boss's default on the next window.
@@ -1010,6 +1020,46 @@ async def post_or_update_public_overview(guild_id: Optional[int]) -> None:
         print(f"Could not post/update public overview for server {guild_id}: {e}")
 
 
+async def post_or_update_overview_mirrors(guild_id: Optional[int]) -> None:
+    """Refresh every read-only mirror of this server's overview.
+
+    A mirror is a plain copy of the overview embed in another channel — usually in a
+    different Discord server — posted with NO buttons attached. It is kept in sync
+    because this runs on every overview update (and on startup via on_ready)."""
+    if guild_id is None:
+        return
+    conn = db_connect()
+    mirrors = conn.cursor().execute(
+        "SELECT channel_id, message_id FROM overview_mirrors WHERE source_server_id = ?",
+        (guild_id,)
+    ).fetchall()
+    conn.close()
+    if not mirrors:
+        return
+    embed = await build_overview_embed(guild_id)
+    for channel_id, message_id in mirrors:
+        try:
+            channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+            if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+                continue
+            if message_id:
+                try:
+                    message = await channel.fetch_message(message_id)
+                    await message.edit(embed=embed, view=None)
+                    continue
+                except discord.NotFound:
+                    pass  # mirror message was deleted; post a fresh one below
+            message = await channel.send(embed=embed)
+            conn2 = db_connect()
+            conn2.cursor().execute(
+                "UPDATE overview_mirrors SET message_id = ? WHERE source_server_id = ? AND channel_id = ?",
+                (message.id, guild_id, channel_id))
+            conn2.commit()
+            conn2.close()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+            print(f"Overview mirror to channel {channel_id} (source {guild_id}) failed: {e}")
+
+
 async def post_or_update_overview(guild_id: Optional[int]) -> None:
     if guild_id is None:
         return
@@ -1024,6 +1074,7 @@ async def post_or_update_overview(guild_id: Optional[int]) -> None:
 
     timer_channel_id, overview_message_id = row
     embed = await build_overview_embed(guild_id)
+    await post_or_update_overview_mirrors(guild_id)
 
     # Build the button view for this server's bosses
     boss_entries: list[tuple[str, str, Optional[str]]] = [
@@ -1632,6 +1683,77 @@ async def configure(interaction: discord.Interaction):
         await dm_channel.send("✅ Done! Check your timer channel for the live overview embed.")
     except Exception as e:
         await dm_channel.send(f"❌ **Error saving configuration!**\n`{e}`")
+
+@bot.tree.command(name="mirror", description="Admin Only: copy this server's overview into another channel (read-only).")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    action="add a mirror, remove one, or list the current mirrors",
+    channel_id="Target channel ID — may be in another Discord server (required for add/remove)."
+)
+@app_commands.choices(action=[
+    app_commands.Choice(name="add", value="add"),
+    app_commands.Choice(name="remove", value="remove"),
+    app_commands.Choice(name="list", value="list"),
+])
+async def mirror_cmd(interaction: discord.Interaction, action: app_commands.Choice[str], channel_id: Optional[str] = None):
+    await interaction.response.defer(ephemeral=True)
+    guild_id = interaction.guild_id
+    if guild_id is None:
+        await interaction.followup.send("❌ Could not determine the server context.", ephemeral=True)
+        return
+
+    if action.value == "list":
+        conn = db_connect()
+        rows = conn.cursor().execute(
+            "SELECT channel_id, message_id FROM overview_mirrors WHERE source_server_id = ?", (guild_id,)
+        ).fetchall()
+        conn.close()
+        if not rows:
+            await interaction.followup.send("No overview mirrors configured for this server.", ephemeral=True)
+            return
+        lines = [f"• `{cid}` {'(posted)' if mid else '(pending)'}" for cid, mid in rows]
+        await interaction.followup.send("**Overview mirrors:**\n" + "\n".join(lines), ephemeral=True)
+        return
+
+    if not channel_id or not channel_id.strip().isdigit():
+        await interaction.followup.send("❌ Provide a numeric `channel_id` for add/remove.", ephemeral=True)
+        return
+    target_id = int(channel_id.strip())
+
+    if action.value == "remove":
+        conn = db_connect()
+        cur = conn.cursor()
+        row = cur.execute(
+            "SELECT message_id FROM overview_mirrors WHERE source_server_id = ? AND channel_id = ?",
+            (guild_id, target_id)).fetchone()
+        cur.execute("DELETE FROM overview_mirrors WHERE source_server_id = ? AND channel_id = ?", (guild_id, target_id))
+        conn.commit()
+        conn.close()
+        if row and row[0]:
+            await _delete_warning_message(target_id, row[0])
+        await interaction.followup.send(f"✅ Mirror to `{target_id}` removed.", ephemeral=True)
+        return
+
+    # add
+    try:
+        channel = bot.get_channel(target_id) or await bot.fetch_channel(target_id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+        await interaction.followup.send(f"❌ I can't access channel `{target_id}`: {e}", ephemeral=True)
+        return
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        await interaction.followup.send("❌ That channel is not a text channel.", ephemeral=True)
+        return
+    conn = db_connect()
+    conn.cursor().execute(
+        "INSERT INTO overview_mirrors (source_server_id, channel_id, message_id) VALUES (?, ?, NULL) "
+        "ON CONFLICT(source_server_id, channel_id) DO NOTHING",
+        (guild_id, target_id))
+    conn.commit()
+    conn.close()
+    await post_or_update_overview_mirrors(guild_id)
+    await interaction.followup.send(
+        f"✅ Overview is now mirrored (read-only, no buttons) into **#{channel.name}**.", ephemeral=True)
+
 
 @bot.tree.command(name="wipe_my_data", description="Admin Only: Permanently deletes all data for this server.")
 @app_commands.checks.has_permissions(administrator=True)

@@ -471,25 +471,38 @@ class TodNowButton(ui.Button):
         if config.get("imageUrl"):
             embed.set_thumbnail(url=config["imageUrl"])
 
-        conn2 = db_connect()
-        row = conn2.cursor().execute(
-            "SELECT alerts_channel_id FROM servers WHERE server_id = ?", (interaction.guild_id,)
-        ).fetchone()
-        conn2.close()
-
-        report_sent = False
-        if row:
-            try:
-                report_channel = await bot.fetch_channel(row[0])
-                await report_channel.send(embed=embed, view=RevertView(history_id))  # type: ignore[union-attr]
-                report_sent = True
-            except (discord.Forbidden, discord.HTTPException) as e:
-                print(f"TodNowButton: could not post to report channel: {e}")
+        report_sent = await send_tod_report(interaction.guild_id, embed, history_id)
 
         ack = f"✅ **{config['name']}** — ToD set to <t:{int(tod_time.timestamp())}:t>."
         if not report_sent:
             ack += " (Report could not be posted to the report channel.)"
         await interaction.followup.send(ack, view=RevertView(history_id), ephemeral=True)
+
+async def send_tod_report(guild_id: Optional[int], embed: discord.Embed, history_id: Optional[int] = None) -> bool:
+    """Single routing point for every 'Timer Set' report.
+
+    Reports ALWAYS go to the server's configured report/alerts channel — never to
+    the overview channel and never inline as a command reply. Every path that
+    records a ToD (slash command and both buttons) must post through here so the
+    destination can't drift apart again. Returns True if the report was posted."""
+    if guild_id is None:
+        return False
+    conn = db_connect()
+    row = conn.cursor().execute(
+        "SELECT alerts_channel_id FROM servers WHERE server_id = ?", (guild_id,)
+    ).fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return False
+    try:
+        report_channel = await bot.fetch_channel(row[0])
+        view = RevertView(history_id) if history_id is not None else None
+        await report_channel.send(embed=embed, view=view)  # type: ignore[union-attr]
+        return True
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+        print(f"send_tod_report: could not post to report channel for guild {guild_id}: {e}")
+        return False
+
 
 async def _fetch_timer_rows(guild_id: int):
     """Return sorted timer rows for the given guild."""
@@ -860,17 +873,7 @@ class PublicTodButton(ui.Button):
         embed.set_footer(text=f"Set by {interaction.user.display_name}")
         if config.get("imageUrl"):
             embed.set_thumbnail(url=config["imageUrl"])
-        conn2 = db_connect()
-        row = conn2.cursor().execute("SELECT alerts_channel_id FROM servers WHERE server_id = ?", (interaction.guild_id,)).fetchone()
-        conn2.close()
-        report_sent = False
-        if row:
-            try:
-                report_channel = await bot.fetch_channel(row[0])
-                await report_channel.send(embed=embed, view=RevertView(history_id))
-                report_sent = True
-            except (discord.Forbidden, discord.HTTPException) as e:
-                print(f"PublicTodButton: could not post to report channel: {e}")
+        report_sent = await send_tod_report(interaction.guild_id, embed, history_id)
         ack = f"✅ **{config['name']}** — ToD set to <t:{int(tod_time.timestamp())}:t>."
         if not report_sent:
             ack += " (Report could not be posted to the report channel.)"
@@ -1059,15 +1062,15 @@ async def post_or_update_overview(guild_id: Optional[int]) -> None:
 
 # --- Main Timer Command Logic ---
 async def _process_tod(interaction: discord.Interaction, boss_key: str, tod_time_utc: Optional[datetime] = None) -> None:
-    await interaction.response.defer()
+    # Ephemeral: the ToD report itself belongs in the report channel, not inline
+    # in whatever channel the command happened to be typed in.
+    await interaction.response.defer(ephemeral=True)
     if interaction.guild_id is None:
-        await interaction.delete_original_response()
         await interaction.followup.send("❌ Could not determine the server context.", ephemeral=True)
         return
 
     config = await _get_boss_config(interaction.guild_id, boss_key)
     if not config:
-        await interaction.delete_original_response()
         await interaction.followup.send(f"❌ Boss `{boss_key}` not found. Use `/boss add` to add a custom boss.", ephemeral=True)
         return
 
@@ -1105,8 +1108,14 @@ async def _process_tod(interaction: discord.Interaction, boss_key: str, tod_time
     if config.get("imageUrl"):
         embed.set_thumbnail(url=config["imageUrl"])
 
-    await interaction.edit_original_response(embed=embed, view=RevertView(history_id))
     await post_or_update_overview(interaction.guild_id)
+
+    # Route the report to the configured report channel (same path as the buttons).
+    report_sent = await send_tod_report(interaction.guild_id, embed, history_id)
+    ack = f"✅ **{config['name']}** — ToD set to <t:{int(tod_time.timestamp())}:t>."
+    if not report_sent:
+        ack += " (Report could not be posted to the report channel.)"
+    await interaction.followup.send(ack, view=RevertView(history_id), ephemeral=True)
 
 async def _process_reset(interaction: discord.Interaction, boss_key: str) -> None:
     await interaction.response.defer(ephemeral=True)

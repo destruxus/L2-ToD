@@ -179,6 +179,8 @@ def setup_database():
         "ALTER TABLE timer_states ADD COLUMN tod_time TEXT;",
         "ALTER TABLE servers ADD COLUMN timer_role_id INTEGER;",
         "ALTER TABLE servers ADD COLUMN unreachable_since TEXT;",
+        # Second, short "starting soon" public warning for the epics (24h notice stays put).
+        "ALTER TABLE public_warnings ADD COLUMN short_message_id INTEGER;",
     ]:
         try:
             cursor.execute(migration)
@@ -822,7 +824,10 @@ async def build_overview_embed(guild_id: Optional[int], only_bosses: Optional[li
 
     return embed
 
-PUBLIC_OVERVIEW_BOSSES = ["ORFEN", "AQ", "CORE"]
+# Bosses shown in the public #epic-announce channel (board + automatic warnings).
+PUBLIC_OVERVIEW_BOSSES = ["ORFEN", "AQ", "CORE", "VALAKAS", "ANTHARAS", "BAIUM"]
+# Of those, only these get a green "set ToD now" button — the epics are announce-only.
+PUBLIC_TOD_BUTTON_BOSSES = ["ORFEN", "AQ", "CORE"]
 
 
 async def build_public_overview_embed(guild_id: int) -> discord.Embed:
@@ -994,7 +999,7 @@ class PublicBossTimerView(ui.View):
     """Persistent view with one open ToD button per public boss (no copy buttons)."""
     def __init__(self):
         super().__init__(timeout=None)
-        for boss_key in PUBLIC_OVERVIEW_BOSSES:
+        for boss_key in PUBLIC_TOD_BUTTON_BOSSES:
             cfg = BOSS_CONFIG.get(boss_key, {})
             self.add_item(PublicTodButton(boss_key=boss_key, label=cfg.get('name', boss_key), emoji_str=cfg.get('emoji')))
 
@@ -1941,41 +1946,53 @@ def _plan_public_for_boss(cur, server_id, public_channel_id, boss_key, now):
         "SELECT tod_time, start_time, duration_hours FROM timer_states WHERE server_id = ? AND boss_key = ?",
         (server_id, boss_key)).fetchone()
     wrow = cur.execute(
-        "SELECT message_id, warned_start, phase, tod_at_post FROM public_warnings WHERE server_id = ? AND boss_key = ?",
+        "SELECT message_id, warned_start, phase, tod_at_post, short_message_id FROM public_warnings WHERE server_id = ? AND boss_key = ?",
         (server_id, boss_key)).fetchone()
     start_iso = trow[1] if (trow and trow[1]) else None
+    short_mid = wrow[4] if wrow else None
 
     def _delete():
-        return {"act": "delete", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "mid": wrow[0]}
+        """Remove the boss from the public channel — both the main warning and, for the
+        epics, the separate short 'starting soon' reminder."""
+        out = [{"act": "delete", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "mid": wrow[0]}]
+        if short_mid:
+            out.append({"act": "delete_short", "sid": server_id, "bk": boss_key, "ch": public_channel_id, "mid": short_mid})
+        return out
 
     # Not enabled for public, or no active window -> make sure nothing is posted.
     if not _effective_public_on(cur, server_id, boss_key, start_iso):
         if wrow:
-            plan.append(_delete())
+            plan.extend(_delete())
         return plan
     if not trow or not trow[1]:
         if wrow:
-            plan.append(_delete())
+            plan.extend(_delete())
         return plan
     tod_time, _s, duration_hours = trow
     # ToD changed, or the window rolled forward -> drop the stale message.
     if wrow and tod_time and wrow[3] and tod_time != wrow[3]:
-        plan.append(_delete())
+        plan.extend(_delete())
         return plan
     if wrow and wrow[1] != start_iso:
-        plan.append(_delete())
+        plan.extend(_delete())
         return plan
     config = _boss_config_sync(cur, server_id, boss_key)
     if not config:
         if wrow:
-            plan.append(_delete())
+            plan.extend(_delete())
         return plan
     bossname = config["name"]
     respawn_hours = config["respawn_hours"]
     start = datetime.fromisoformat(start_iso)
     end = start + timedelta(hours=duration_hours)
     default_on = boss_key in PUBLIC_OVERVIEW_BOSSES
-    lead = PUBLIC_LEAD_MIN if default_on else 10 ** 9  # manual call-outs show immediately
+    is_epic = boss_key in EPIC_BOSSES
+    if not default_on:
+        lead = 10 ** 9                      # manual call-outs show immediately
+    elif is_epic:
+        lead = EPIC_OFFICER_LEAD_MIN        # epics get the long 24h notice, like officers
+    else:
+        lead = PUBLIC_LEAD_MIN              # everyone else: 20 minutes ahead
     mts = (start - now).total_seconds() / 60.0
     projected_start = start
     while projected_start + timedelta(minutes=1) < now:
@@ -1984,7 +2001,7 @@ def _plan_public_for_boss(cur, server_id, public_channel_id, boss_key, now):
     open_text = f"🟢 **{bossname}** window is **open now** — closes <t:{int(end.timestamp())}:R> (<t:{int(end.timestamp())}:t>)."
     if 0 < mts <= lead and (not wrow or wrow[1] != start_iso):
         if wrow:
-            plan.append(_delete())
+            plan.extend(_delete())
         plan.append({"act": "send", "sid": server_id, "bk": boss_key, "ch": public_channel_id,
                      "text": up_text, "warned_start": start_iso, "phase": "upcoming", "tod": tod_time})
     elif start <= now <= end and (not wrow or wrow[2] != "open_" + start_iso):
@@ -2005,7 +2022,21 @@ def _plan_public_for_boss(cur, server_id, public_channel_id, boss_key, now):
                              "mid": wrow[0], "text": miss_text, "phase": tag})
         else:
             # A manually called-out raid whose window has ended -> clear it from public.
-            plan.append(_delete())
+            plan.extend(_delete())
+
+    # Epics additionally get a short "starting soon" reminder ~20 min out. It is a
+    # SEPARATE message so the 24h notice — and the sign-up reactions people have
+    # already added to it — stays exactly where it is.
+    if is_epic and default_on and wrow:
+        if 0 < mts <= PUBLIC_LEAD_MIN and not short_mid:
+            short_text = (f"🔔 **{bossname}** window opens <t:{int(start.timestamp())}:R> "
+                          f"(<t:{int(start.timestamp())}:t>) — get ready.")
+            plan.append({"act": "send_short", "sid": server_id, "bk": boss_key,
+                         "ch": public_channel_id, "text": short_text, "no_reactions": True})
+        elif short_mid and (mts <= 0 or mts > PUBLIC_LEAD_MIN):
+            # Window has opened (or rolled back out of range) -> retire the reminder.
+            plan.append({"act": "delete_short", "sid": server_id, "bk": boss_key,
+                         "ch": public_channel_id, "mid": short_mid})
     return plan
 
 
@@ -2026,6 +2057,10 @@ def _write_public_warnings(writes):
                 (w["sid"], w["bk"], w["mid"], w["warned_start"], w["phase"], w["tod"]))
         elif w["op"] == "phase":
             cur.execute("UPDATE public_warnings SET phase = ? WHERE server_id = ? AND boss_key = ?", (w["phase"], w["sid"], w["bk"]))
+        elif w["op"] == "set_short":
+            cur.execute("UPDATE public_warnings SET short_message_id = ? WHERE server_id = ? AND boss_key = ?", (w["mid"], w["sid"], w["bk"]))
+        elif w["op"] == "clear_short":
+            cur.execute("UPDATE public_warnings SET short_message_id = NULL WHERE server_id = ? AND boss_key = ?", (w["sid"], w["bk"]))
     conn.commit()
     conn.close()
 
@@ -2170,6 +2205,15 @@ async def _run_warning_plan(plan, send_fn, edit_fn, delete_fn):
             mid = await send_fn(p["ch"], p["text"], p)
             if mid:
                 writes.append({"op": "upsert", "sid": p["sid"], "bk": p["bk"], "mid": mid, "warned_start": p["warned_start"], "phase": p["phase"], "tod": p.get("tod")})
+        elif p["act"] == "send_short":
+            # Second "starting soon" message; tracked separately so the 24h sign-up
+            # post (and its reactions) is never replaced.
+            mid = await send_fn(p["ch"], p["text"], p)
+            if mid:
+                writes.append({"op": "set_short", "sid": p["sid"], "bk": p["bk"], "mid": mid})
+        elif p["act"] == "delete_short":
+            await delete_fn(p["ch"], p["mid"])
+            writes.append({"op": "clear_short", "sid": p["sid"], "bk": p["bk"]})
     return writes
 
 
@@ -2198,13 +2242,18 @@ async def _edit_officer_warning(channel_id, message_id, text, p=None):
 async def _send_public_warning(channel_id, text, p=None):
     try:
         ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
-        msg = await ch.send(text + PUBLIC_LEGEND, allowed_mentions=discord.AllowedMentions.none())
-        # Seed the two sign-up reactions so members can join / flag a camera.
-        try:
-            await msg.add_reaction(REACT_PARTICIPATE)
-            await msg.add_reaction(REACT_CAMERA)
-        except discord.HTTPException:
-            pass
+        # The short "starting soon" reminder carries no legend/reactions — sign-ups
+        # stay on the main warning so the counts aren't split across two messages.
+        bare = bool(p and p.get("no_reactions"))
+        msg = await ch.send(text if bare else text + PUBLIC_LEGEND,
+                            allowed_mentions=discord.AllowedMentions.none())
+        if not bare:
+            # Seed the two sign-up reactions so members can join / flag a camera.
+            try:
+                await msg.add_reaction(REACT_PARTICIPATE)
+                await msg.add_reaction(REACT_CAMERA)
+            except discord.HTTPException:
+                pass
         return msg.id
     except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
         print(f"public warning send failed: {e}")
